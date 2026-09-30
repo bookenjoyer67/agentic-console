@@ -37,6 +37,24 @@ What does a newcomer need before the runtime works?
 3. Build the runtime: `sandbox/run-agent.sh` builds the broker from `sandbox/broker` if the image is missing,
    then starts the agent container on an internal network with a dummy token.
 
+## Continuous integration
+
+Which workflow checks what, and when does it run?
+
+| workflow | trigger | what it runs |
+| --- | --- | --- |
+| `ci.yml` | pull requests | the pipeline: classification, the policy suite in the sandbox image, the cargo gates, the conformance gate, the retrieval harness, an advisory review, and the audit trail |
+| `main-gate.yml` | pushes to `main` | the three cargo gates and the conformance gate, because a commit that lands on `main` should not be the first thing anyone checks |
+
+The pipeline workflow runs on pull requests because its change classifier reads the pull request's base sha.
+Drift in the governed prose is caught there, where a base exists; the push-time conformance step proves the
+gate runs and the governed files still resolve.
+
+The advisory reviewer needs an `OPENROUTER_API_KEY` repository secret. Until one is set it reports `not_run`.
+It is advisory in both cases and never blocks a merge.
+
+`docs/fork-proof.md` carries the measured evidence, including the run where every job executed.
+
 A clone of this repository names the repository it watches, because the console's no-argument default is the
 repository it sits inside:
 
