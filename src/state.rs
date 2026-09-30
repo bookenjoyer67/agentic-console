@@ -169,6 +169,14 @@ pub struct LiveView {
     pub gate_allowlist_error: Option<String>,
     pub checkpoint: Card,
     pub port_line: String,
+    /// How many lines the probe read from the named session's own transcript tail, or `None` when
+    /// that read failed or named no session.
+    ///
+    /// The reply guard compares this across sends: a ruling sent again into a session whose
+    /// transcript reads the same number of lines is the same words into a run that has not moved.
+    /// The comparison is made against what the probe layer actually read, never against a count
+    /// reconstructed from the card's prose, so the guard rests on the same reading the card does.
+    pub session_transcript_lines: Option<usize>,
     /// What `docker exec <container> ps` actually returned, so the reading can be checked.
     pub procs: Vec<ProcLine>,
     pub proc_total: usize,
@@ -1827,6 +1835,14 @@ fn build_live(cfg: &Config, probes: &Probes) -> LiveView {
         .join("  ");
     let checks = build_checks(cfg, probes);
     let checkpoint = checkpoint::detect(cfg, probes);
+    // The probe's own tail read of the named session's transcript: the line count the reply guard
+    // compares. Absent when the read failed or no session was named, and the guard says so by
+    // comparing `None` to `None` rather than by inventing a count.
+    let session_transcript_lines = probes
+        .session_transcript
+        .value
+        .as_ref()
+        .map(|read| read.lines.len());
     let procs = probes
         .container_ps
         .value
@@ -1862,6 +1878,7 @@ fn build_live(cfg: &Config, probes: &Probes) -> LiveView {
         checks,
         checkpoint,
         port_line,
+        session_transcript_lines,
     }
 }
 

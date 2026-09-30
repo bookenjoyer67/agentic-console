@@ -349,7 +349,8 @@ DEFAULT: dict[str, Any] = {
                 "id": "approve-as-written",
                 "label": "approve as written",
                 "text": "Approved. Proceed with the plan as written.",
-                "prefill": False
+                "prefill": False,
+                "checkpoints": [1],
             },
             {
                 "id": "approve-with-rework",
@@ -359,7 +360,32 @@ DEFAULT: dict[str, Any] = {
                     " then stop at checkpoint 1 again for approval. Do not start implementing before"
                     " the revised plan is approved."
                 ),
-                "prefill": True
+                "prefill": True,
+                "checkpoints": [1],
+            },
+            {
+                "id": "release-as-written",
+                "label": "release as written",
+                "text": "Approved: release as written. Close the ticket and stop.",
+                "prefill": False,
+                "checkpoints": [2],
+            },
+            {
+                "id": "release-with-followup",
+                "label": "release, with a follow-up",
+                "text": (
+                    "Approved: release as written, then open a follow-up for <name the follow-up>."
+                    " Stop after opening it."
+                ),
+                "prefill": True,
+                "checkpoints": [2],
+            },
+            {
+                "id": "hold-open",
+                "label": "hold the ticket open",
+                "text": "Hold: do not close the ticket yet. Report what remains open and stop.",
+                "prefill": True,
+                "checkpoints": [2],
             },
             {
                 "id": "halt",
@@ -369,7 +395,8 @@ DEFAULT: dict[str, Any] = {
                     " stop this run here and report what you have so far. I will decide the next"
                     " step."
                 ),
-                "prefill": True
+                "prefill": True,
+                "checkpoints": [],
             },
         ],
     },

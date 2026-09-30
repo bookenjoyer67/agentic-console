@@ -12,6 +12,15 @@
 //! * `e` opens the **ruling chooser**, which lists each configured ruling with its exact wording and
 //!   offers free text. Its numbers are the chooser's own; `1`/`2`/`3` stay the tabs everywhere else,
 //!   so a run can never be halted by a keypress meant for a screen.
+//!
+//! Two things constrain what either key may send. A ruling must be **written for the checkpoint the
+//! card names**: `Enter` sends the first configured wording that applies there, the chooser lists
+//! only those, and a checkpoint no wording covers is refused rather than answered with another
+//! checkpoint's text -- a plan approval sent at release approval is refused by the run itself, which
+//! is how an operator was walked into sending byte-identical text twice. And a ruling **already sent
+//! into a run that has not moved** is refused: the same text, into the same session, while that
+//! session's transcript reads exactly as it did at that send, is the same words into a stop that did
+//! not advance, and saying so is more use than sending them again.
 
 use std::os::unix::process::ExitStatusExt;
 use std::process::Child;
@@ -22,9 +31,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::actions::{self, ActionKind, Command, Guards};
 use crate::cache;
-use crate::checkpoint::Card;
+use crate::checkpoint::{self, Card};
 use crate::collector::Collector;
-use crate::config::Config;
+use crate::config::{Config, Ruling};
 use crate::iso;
 use crate::state::{Probes, Snapshot};
 
@@ -96,6 +105,45 @@ pub struct Running {
     pub started: SystemTime,
 }
 
+/// The last ruling the console actually sent, and how the run's transcript read at that moment.
+///
+/// Nothing here is written down: the record lives for the session and dies with it. It exists so the
+/// console can tell a ruling that *advanced* a run from the same ruling dictated into a run that has
+/// not moved -- the shape that left an operator sending byte-identical text twice, because the
+/// console kept offering a ruling and the run kept refusing it.
+///
+/// The transcript is remembered twice over on purpose. The line count is what the probe layer read
+/// from the session's own transcript tail; but that read is a *capped* tail
+/// (`probe::TRANSCRIPT_TAIL_LINES` lines out of a byte-limited `tail -c`), so a run that has grown
+/// past the cap reads the same number of lines however much it writes. The transcript file's own
+/// byte size, which the card's session read already carries, keeps growing. Either one having
+/// changed is the run having moved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SentRuling {
+    /// The id of the canned ruling whose text this was; empty for the chooser's free text.
+    id: String,
+    /// The exact text sent, trimmed exactly as the command builder trims it.
+    text: String,
+    /// The session the ruling was resumed into.
+    session: String,
+    /// The named session's transcript tail line count, as the probe last read it.
+    lines: Option<usize>,
+    /// The transcript file's own byte size from that same reading.
+    size: Option<u64>,
+}
+
+/// The checkpoint number a card's canonical name carries.
+///
+/// Read from `checkpoint::checkpoint_name` rather than scanned out of the text: "the name mentions a
+/// 2" is not the question, and the placeholder a card carries when no evidence named a checkpoint
+/// ("no checkpoint named by any evidence") must name no checkpoint here either. A name that is
+/// exactly a canonical checkpoint name yields its number; anything else yields `None`.
+fn checkpoint_index(name: &str) -> Option<u8> {
+    [1u8, 2]
+        .into_iter()
+        .find(|index| checkpoint::checkpoint_name(*index) == name)
+}
+
 /// How a finished action ended, as one phrase: its exit code, or the signal that killed it.
 ///
 /// The console never guesses here: a child that reported no code is *not* read as `0`, and one that
@@ -163,6 +211,9 @@ pub struct App {
     pub refresh_interval: Duration,
     /// The age at which the snapshot on the screen is labelled STALE, from the same table.
     pub stale_after: Duration,
+    /// The last ruling sent, with the run's own state at that send: memory only, as the guard it
+    /// serves is about this session and not about anything a file should remember.
+    last_ruling_sent: Option<SentRuling>,
 }
 
 impl App {
@@ -236,6 +287,7 @@ impl App {
             last_request_forced: false,
             refresh_interval,
             stale_after,
+            last_ruling_sent: None,
         }
     }
 
@@ -504,10 +556,33 @@ impl App {
         }
     }
 
-    /// The rule the rulings key list obeys: how many rows the chooser draws, the canned rulings plus
-    /// one free-text row. Zero when nothing is configured, which is also when `e` skips the chooser.
+    /// The canned rulings written for the checkpoint the card names, in config order.
+    ///
+    /// The chooser offers exactly these: a wording scoped to another checkpoint is not a candidate at
+    /// this one, and offering it would put the operator one keystroke from the text the run refuses.
+    /// An unscoped ruling (`checkpoints: []`) applies everywhere, and is what keeps `halt` reachable
+    /// from both checkpoints.
+    ///
+    /// When the card names no checkpoint this console recognises, *every* configured wording is
+    /// applicable: there is no checkpoint to scope by, so nothing may be pruned, and the first of them
+    /// is the default `Enter` sends -- which is what this console did before wording was scoped at all.
+    /// Scoping is never widened from a name it could not read for any other reason: a card that names
+    /// checkpoint 2 for real still gets checkpoint 2's wording and nothing else.
+    pub fn applicable_rulings(&self) -> Vec<&Ruling> {
+        let rules = self.config.rulings();
+        match checkpoint_index(&self.card().which) {
+            Some(index) => rules
+                .iter()
+                .filter(|ruling| ruling.applies_to(index))
+                .collect(),
+            None => rules.iter().collect(),
+        }
+    }
+
+    /// The rule the rulings key list obeys: how many rows the chooser draws -- the applicable canned
+    /// rulings, then one free-text row, which is always last so its number stays the next one.
     pub fn chooser_rows(&self) -> usize {
-        self.config.rulings().len() + 1
+        self.applicable_rulings().len() + 1
     }
 
     /// Whether the card offers a ruling right now, exactly as the action builder will read it.
@@ -650,10 +725,11 @@ impl App {
 
     /// `e`: the ruling chooser.
     ///
-    /// The canned rulings come from `console.rulings`, each drawn with its exact wording before it
-    /// is chosen, and only choosing one reaches the confirmation screen -- this key sends nothing.
-    /// A card that offers no ruling is refused here in the card's own words, exactly as before. A
-    /// config with no canned ruling falls back to the free-text box, which is what `e` always was.
+    /// The chooser lists the canned rulings **written for the checkpoint the card names**, each drawn
+    /// with its exact wording before it is chosen, and only choosing one reaches the confirmation
+    /// screen -- this key sends nothing. A card that offers no ruling is refused here in the card's
+    /// own words, exactly as before. With no applicable canned ruling the free-text box opens
+    /// directly, which is what `e` always was.
     fn begin_ruling(&mut self) {
         let card = self.snapshot.live.checkpoint.clone();
         if !card.can_approve {
@@ -665,34 +741,51 @@ impl App {
             self.note(format!("ruling refused: {reason}"));
             return;
         }
-        if self.config.rulings().is_empty() {
+        let applicable = self.applicable_rulings().len();
+        if applicable == 0 {
             self.begin_free_ruling();
             return;
         }
         self.status = format!(
             "ruling chooser for {}: 1-{} pick a canned ruling, c free text, Esc closes (nothing is \
              sent until the confirmation screen is answered)",
-            card.which,
-            self.config.rulings().len()
+            card.which, applicable
         );
         self.mode = Mode::Choose { selection: 0 };
     }
 
-    /// `Enter` on the LIVE tab: the confirmation screen for the default canned ruling.
+    /// `Enter` on the LIVE tab: the confirmation screen for the ruling written for this checkpoint.
     ///
     /// One keystroke reaches the confirmation -- and stops there. The modal shows the exact command
     /// and the text about to be sent, and only `y` starts anything, so this key cannot send a ruling
-    /// by itself. Off the LIVE tab, or with no ruling offered, it changes nothing: the refusal is
-    /// the action builder's own words, so the operator reads the same sentence here as in `--dump`.
+    /// by itself. Off the LIVE tab it changes nothing.
+    ///
+    /// Which ruling that is comes from the card: the first configured wording written for the
+    /// checkpoint the card names. When the card names a checkpoint no canned wording covers, the key
+    /// **refuses** rather than sending a wording meant for the other checkpoint -- a plan approval at
+    /// release approval is refused by the run anyway, and being handed the same default again is what
+    /// walked the operator into sending byte-identical text twice. A card that names no checkpoint
+    /// this console recognises (the idle and contested states) keeps the old path: the first
+    /// configured ruling, which the action builder then refuses in its own words.
     fn approve_with_default_ruling(&mut self) {
         if self.tab != Tab::Live {
             return;
         }
-        let Some(ruling) = self.config.default_ruling().cloned() else {
-            self.status =
-                "no canned ruling is configured in console.rulings; press c in the chooser to write \
-                 one"
-                    .to_string();
+        let card = self.snapshot.live.checkpoint.clone();
+        let checkpoint = checkpoint_index(&card.which);
+        let Some(ruling) = self.config.default_ruling_for(checkpoint).cloned() else {
+            let reason = match checkpoint {
+                Some(_) => format!(
+                    "no canned ruling in console.rulings is written for {}; press e to choose or \
+                     write one",
+                    card.which
+                ),
+                None => "no canned ruling is configured in console.rulings; press e to choose or \
+                         write one"
+                    .to_string(),
+            };
+            self.note(format!("ruling refused: {reason}"));
+            self.status = reason;
             return;
         };
         self.note(format!(
@@ -715,7 +808,7 @@ impl App {
     /// their `1`/`2`/`3` everywhere else, which is why a ruling is never one keystroke away from a
     /// screen the operator meant to open.
     fn on_choose(&mut self, key: KeyEvent, selection: usize) {
-        let rulings = self.config.rulings().len();
+        let rulings = self.applicable_rulings().len();
         let rows = self.chooser_rows();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -745,14 +838,19 @@ impl App {
         }
     }
 
-    /// Take one canned ruling, by its position in `console.rulings`.
+    /// Take one canned ruling, by its row in the chooser.
     ///
-    /// `prefill` decides where it lands: `true` puts the configured wording in the text box for
-    /// amendment, `false` takes it as written and goes straight to the confirmation screen. Both
-    /// end on the confirmation screen, and neither starts anything.
+    /// The row is a position in the **applicable** list the chooser drew, not in `console.rulings`:
+    /// a wording scoped to another checkpoint is not a row here at all, so the numbers stay
+    /// contiguous over the rulings the operator can actually send. `prefill` decides where it lands:
+    /// `true` puts the configured wording in the text box for amendment, `false` takes it as written
+    /// and goes straight to the confirmation screen. Both end on the confirmation screen, and neither
+    /// starts anything.
     fn pick_ruling(&mut self, index: usize) {
-        let Some(ruling) = self.config.rulings().get(index).cloned() else {
-            self.status = format!("no canned ruling {} is configured", index + 1);
+        let applicable: Vec<Ruling> = self.applicable_rulings().into_iter().cloned().collect();
+        let Some(ruling) = applicable.get(index).cloned() else {
+            let which = self.card().which.clone();
+            self.status = format!("no canned ruling {} applies to {which}", index + 1);
             self.mode = Mode::Normal;
             return;
         };
@@ -817,7 +915,20 @@ impl App {
     }
 
     /// Build the command and put its exact text on screen for confirmation.
+    ///
+    /// One send is refused before it is even built: a ruling whose exact text was already sent into
+    /// this session while that session's transcript has not moved since. The refusal is here rather
+    /// than on the confirmation key, so the operator never reaches a confirmation screen for words
+    /// that cannot advance the run.
     fn propose(&mut self, kind: ActionKind, value: String) {
+        if kind == ActionKind::Ruling {
+            if let Some(reason) = self.replay_refusal(&value) {
+                self.note(format!("ruling refused: {reason}"));
+                self.status = format!("refused: {reason}");
+                self.mode = Mode::Normal;
+                return;
+            }
+        }
         match actions::build(&self.config, kind, &value, self.guards()) {
             Ok(command) => {
                 if let Some(path) = command.writes.first().map(|(path, _)| path.clone()) {
@@ -838,6 +949,70 @@ impl App {
         }
     }
 
+    /// Why this ruling must not be sent again, when it must not.
+    ///
+    /// The rule is the run's own diagnosis: two byte-identical messages after a run reached its stop
+    /// condition means the relay is replaying rather than advancing. So the test is on the run, not on
+    /// the console's intent -- the same text, into the same session, while that session's transcript
+    /// reads exactly as it did at the last send. If the transcript has grown the run moved, and the
+    /// ruling is allowed again; a different session or different words are somebody else's decision
+    /// and are not this guard's business.
+    fn replay_refusal(&self, text: &str) -> Option<String> {
+        let sent = self.last_ruling_sent.as_ref()?;
+        if sent.text != text.trim() {
+            return None;
+        }
+        let session = self.guards().session.named().cloned()?;
+        if sent.session != session.id {
+            return None;
+        }
+        let lines = self.snapshot.live.session_transcript_lines;
+        if lines != sent.lines || Some(session.size) != sent.size {
+            return None;
+        }
+        let ruling = if sent.id.is_empty() {
+            "the identical ruling text".to_string()
+        } else {
+            format!("the identical ruling '{}'", sent.id)
+        };
+        let reads = match (sent.lines, sent.size) {
+            (Some(count), _) => format!("still reads {count} line(s) from its tail"),
+            (None, Some(bytes)) => format!("still reads at {bytes} bytes"),
+            (None, None) => "still reads no further than it did at that send".to_string(),
+        };
+        Some(format!(
+            "{ruling} was already sent into session {}, and the run's stop is unchanged: its \
+             transcript {reads}, exactly as at that send. The same words cannot advance a run that \
+             has not moved -- press e to choose a different ruling, or type a different one.",
+            checkpoint::short_id(&sent.session)
+        ))
+    }
+
+    /// Remember a ruling the operator has just confirmed, with the run's own state at that instant.
+    ///
+    /// Recorded at the confirmation rather than at the child's exit: what the guard is about is the
+    /// console having sent those words into that session, and a run that stops on them does so after
+    /// this point, which is exactly the state the next send is measured against.
+    fn remember_sent_ruling(&mut self, command: &Command) {
+        let Some(session) = command.guards.session.named() else {
+            return;
+        };
+        let id = self
+            .config
+            .rulings()
+            .iter()
+            .find(|ruling| ruling.text == command.value)
+            .map(|ruling| ruling.id.clone())
+            .unwrap_or_default();
+        self.last_ruling_sent = Some(SentRuling {
+            id,
+            text: command.value.clone(),
+            session: session.id.clone(),
+            lines: self.snapshot.live.session_transcript_lines,
+            size: Some(session.size),
+        });
+    }
+
     fn on_confirm(&mut self, key: KeyEvent, command: Command) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
@@ -846,6 +1021,9 @@ impl App {
                     self.note(format!("note: {line}"));
                 }
                 self.note(format!("run: {display}"));
+                if command.kind == ActionKind::Ruling {
+                    self.remember_sent_ruling(&command);
+                }
                 match actions::start(&command) {
                     Ok(started) => {
                         self.note(format!(
@@ -881,5 +1059,32 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_checkpoint_number_is_read_from_the_canonical_name_only() {
+        assert_eq!(
+            checkpoint_index("HUMAN CHECKPOINT 1 (plan approval)"),
+            Some(1)
+        );
+        assert_eq!(
+            checkpoint_index("HUMAN CHECKPOINT 2 (release approval)"),
+            Some(2)
+        );
+        // The card's own placeholder names no checkpoint, and neither does any other text: the name is
+        // matched against `checkpoint::checkpoint_name`, not scanned for a digit, so neither the words
+        // "no checkpoint named by any evidence" nor a bare "HUMAN CHECKPOINT 2" resolves to a number.
+        assert_eq!(
+            checkpoint_index("no checkpoint named by any evidence"),
+            None
+        );
+        assert_eq!(checkpoint_index("HUMAN CHECKPOINT 2"), None);
+        assert_eq!(checkpoint_index("checkpoint 2 (release approval)"), None);
+        assert_eq!(checkpoint_index(""), None);
     }
 }

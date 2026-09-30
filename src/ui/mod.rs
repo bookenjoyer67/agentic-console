@@ -427,7 +427,9 @@ fn draw_modal(frame: &mut Frame, area: Rect, app: &App) {
             );
         }
         Mode::Choose { selection } => {
-            let rulings = app.config.rulings();
+            // The applicable rulings, not every configured one: the rows drawn here are the rows the
+            // digits pick, so a wording scoped to another checkpoint must not be given a number.
+            let rulings = app.applicable_rulings();
             let rows = rulings.len() + 1;
             let height = ((rows as u16) * 3 + 8).min(area.height);
             let popup = centered(area, 88, height);

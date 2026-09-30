@@ -64,9 +64,9 @@ pub struct OrchStep {
 /// One canned ruling: the wording the console offers at a checkpoint, from `console.rulings`.
 ///
 /// The whole point is that the wording is the fork's, not the code's: a repository whose checkpoints
-/// ask for something else writes its own list and the console speaks its language. The first ruling
-/// in the list is the *default* -- the one `Enter` sends on the LIVE tab -- so the order is
-/// meaningful, and the chooser numbers them in the order the config writes them.
+/// ask for something else writes its own list and the console speaks its language. The order is
+/// meaningful twice over: `Enter` sends the first ruling that *applies* to the checkpoint the card
+/// names, and the chooser numbers the applicable ones in the order the config writes them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ruling {
     /// The stable id, printed by `--dump` and by the dry run, for a fork's own scripts to name.
@@ -82,6 +82,22 @@ pub struct Ruling {
     /// screen, which is the one-keystroke path. Either way the confirmation screen still has to be
     /// answered, so no ruling is ever sent from a single keypress.
     pub prefill: bool,
+    /// Which checkpoints this wording is written for; empty means any.
+    ///
+    /// A ruling scoped to `[1]` is wording for the plan decision and must not be offered at release
+    /// approval. The run reads the text, not this console's intent, so a plan approval sent at the
+    /// release checkpoint is refused by the run itself -- and the operator, offered the same default
+    /// again, sends byte-identical text and stays stuck. Scoping the wording is what stops that at
+    /// the source; an unscoped ruling (a halt, say) is the one wording that fits both checkpoints.
+    pub checkpoints: Vec<u8>,
+}
+
+impl Ruling {
+    /// Whether this wording is written for `checkpoint`: always for an unscoped ruling, and only for
+    /// the checkpoints a scoped one names.
+    pub fn applies_to(&self, checkpoint: u8) -> bool {
+        self.checkpoints.is_empty() || self.checkpoints.contains(&checkpoint)
+    }
 }
 
 /// The `console` block: the runtime facts a console needs that the rest of the config does not carry.
@@ -114,7 +130,8 @@ pub struct Console {
     pub role_container_prefix: String,
     /// How long a journal shape counts as fresh evidence of a checkpoint waiting on a human.
     pub checkpoint_fresh_minutes: u64,
-    /// The canned rulings the chooser offers, in order. The first is the default `Enter` sends.
+    /// The canned rulings the chooser offers, in order. `Enter` sends the first one written for the
+    /// checkpoint that is open.
     pub rulings: Vec<Ruling>,
     /// `console.*` keys the config still carries at the Komun default.
     pub komun_defaults: Vec<String>,
@@ -176,15 +193,19 @@ impl Default for Console {
             session_window_seconds: 120,
             role_container_prefix: "agent-rev-m4-".to_string(),
             checkpoint_fresh_minutes: 30,
-            // The same three, with the same wording, as `console.rulings` in this repository's
-            // `agentic.config.json` and in `scripts/agentic_config.py`'s embedded `DEFAULT`: a
-            // repository with no console block gets this repository's checkpoints, and says so.
+            // The same six, with the same wording and the same checkpoint scoping, as
+            // `console.rulings` in this repository's `agentic.config.json` and in
+            // `scripts/agentic_config.py`'s embedded `DEFAULT`: a repository with no console block
+            // gets this repository's checkpoints, and says so. The order is the order `Enter` and the
+            // chooser read them: each checkpoint's own `as written` wording comes before the halt, so
+            // the one-keystroke default at either checkpoint is the approval for that stage.
             rulings: vec![
                 Ruling {
                     id: "approve-as-written".to_string(),
                     label: "approve as written".to_string(),
                     text: "Approved. Proceed with the plan as written.".to_string(),
                     prefill: false,
+                    checkpoints: vec![1],
                 },
                 Ruling {
                     id: "approve-with-rework".to_string(),
@@ -194,6 +215,31 @@ impl Default for Console {
                            before the revised plan is approved."
                         .to_string(),
                     prefill: true,
+                    checkpoints: vec![1],
+                },
+                Ruling {
+                    id: "release-as-written".to_string(),
+                    label: "release as written".to_string(),
+                    text: "Approved: release as written. Close the ticket and stop.".to_string(),
+                    prefill: false,
+                    checkpoints: vec![2],
+                },
+                Ruling {
+                    id: "release-with-followup".to_string(),
+                    label: "release, with a follow-up".to_string(),
+                    text: "Approved: release as written, then open a follow-up for <name the \
+                           follow-up>. Stop after opening it."
+                        .to_string(),
+                    prefill: true,
+                    checkpoints: vec![2],
+                },
+                Ruling {
+                    id: "hold-open".to_string(),
+                    label: "hold the ticket open".to_string(),
+                    text: "Hold: do not close the ticket yet. Report what remains open and stop."
+                        .to_string(),
+                    prefill: true,
+                    checkpoints: vec![2],
                 },
                 Ruling {
                     id: "halt".to_string(),
@@ -202,6 +248,7 @@ impl Default for Console {
                            you have so far. I will decide the next step."
                         .to_string(),
                     prefill: true,
+                    checkpoints: Vec::new(),
                 },
             ],
             orchestration_steps: vec![
@@ -496,18 +543,41 @@ impl Config {
         self.console.komun_defaults.iter().any(|entry| entry == key)
     }
 
-    /// The canned rulings, in the order the chooser numbers them, from `console.rulings`.
+    /// The canned rulings, in the order `console.rulings` writes them.
     ///
-    /// The order is the config's: the first entry is the default `Enter` sends on the LIVE tab, and
-    /// the chooser offers `1`..`N` in this order. A config that carries no `rulings` (or none with a
-    /// text) falls back to the embedded ones, so the console always has a wording to offer.
+    /// The order is the config's: the chooser offers the applicable ones as `1`..`N` in this order,
+    /// and `Enter` sends the first that applies to the checkpoint the card names. A config that
+    /// carries no `rulings` (or none with a text) falls back to the embedded ones, so the console
+    /// always has a wording to offer.
     pub fn rulings(&self) -> &[Ruling] {
         &self.console.rulings
     }
 
-    /// The ruling `Enter` sends at an offered checkpoint: the first configured one, if any.
+    /// The ruling `Enter` sends at an offered checkpoint: the first configured one.
+    ///
+    /// Kept no-argument for the one caller that has no checkpoint in hand -- the card's own command
+    /// preview, which is built before the operator chooses anything. The LIVE tab's `Enter` asks
+    /// [`Config::default_ruling_for`] instead, so it can never send a wording written for another
+    /// checkpoint.
     pub fn default_ruling(&self) -> Option<&Ruling> {
-        self.console.rulings.first()
+        self.default_ruling_for(None)
+    }
+
+    /// The first configured ruling whose wording is written for `checkpoint`, when one is.
+    ///
+    /// `None` means "no checkpoint this console recognises": with nothing to scope by, the first
+    /// configured ruling is the only honest answer, and it is the same one `default_ruling` returns.
+    /// A `Some` checkpoint that no ruling is written for yields `None` -- the caller refuses, rather
+    /// than sending a wording meant for another checkpoint.
+    pub fn default_ruling_for(&self, checkpoint: Option<u8>) -> Option<&Ruling> {
+        match checkpoint {
+            Some(index) => self
+                .console
+                .rulings
+                .iter()
+                .find(|ruling| ruling.applies_to(index)),
+            None => self.console.rulings.first(),
+        }
     }
 
     /// The configured ruling with this id.
@@ -656,11 +726,25 @@ impl Console {
                         .get("prefill")
                         .and_then(Value::as_bool)
                         .unwrap_or(true);
+                    // The checkpoints this wording is written for. Absent means the wording is
+                    // unscoped, which is the only reading a ruling to "halt" or "proceed" can carry:
+                    // scoping is opt-in, and an entry with no `checkpoints` keeps working as before.
+                    let checkpoints = entry
+                        .get("checkpoints")
+                        .and_then(Value::as_array)
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(Value::as_u64)
+                                .filter_map(|number| u8::try_from(number).ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     Some(Ruling {
                         id,
                         label,
                         text,
                         prefill,
+                        checkpoints,
                     })
                 })
                 .collect();
@@ -792,4 +876,140 @@ pub fn embedded_defaults() -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One `console.rulings` entry, as the config file writes it.
+    fn entry(id: &str, checkpoints: Value) -> Value {
+        json!({
+            "id": id,
+            "label": id,
+            "text": format!("{id} wording"),
+            "prefill": false,
+            "checkpoints": checkpoints,
+        })
+    }
+
+    fn console_with(rulings: Value) -> Console {
+        Console::from_value(&json!({ "rulings": rulings }))
+    }
+
+    fn config_with(console: Console) -> Config {
+        Config {
+            repo: PathBuf::from("/repo"),
+            path: PathBuf::from("/repo/agentic.config.json"),
+            root: json!({}),
+            from_file: true,
+            console,
+            console_present: true,
+            container_overridden: false,
+            read_at: SystemTime::now(),
+            load_error: None,
+        }
+    }
+
+    #[test]
+    fn a_ruling_reads_the_checkpoints_it_is_written_for_and_an_empty_list_means_any() {
+        let console = console_with(json!([
+            entry("plan", json!([1])),
+            entry("release", json!([2])),
+            entry("halt", json!([])),
+            // No `checkpoints` key at all: unscoped, which is how every ruling behaved before the
+            // key existed, so an older config keeps meaning what it meant.
+            json!({"id": "old", "label": "old", "text": "old wording", "prefill": false}),
+        ]));
+        let by_id = |id: &str| {
+            console
+                .rulings
+                .iter()
+                .find(|ruling| ruling.id == id)
+                .unwrap_or_else(|| panic!("no ruling {id}"))
+        };
+
+        assert_eq!(by_id("plan").checkpoints, vec![1]);
+        assert!(by_id("plan").applies_to(1) && !by_id("plan").applies_to(2));
+        assert!(by_id("release").applies_to(2) && !by_id("release").applies_to(1));
+        assert!(by_id("halt").applies_to(1) && by_id("halt").applies_to(2));
+        assert_eq!(by_id("old").checkpoints, Vec::<u8>::new());
+        assert!(by_id("old").applies_to(1) && by_id("old").applies_to(2));
+    }
+
+    #[test]
+    fn enter_s_default_is_the_first_ruling_written_for_the_open_checkpoint() {
+        let config = config_with(console_with(json!([
+            entry("plan", json!([1])),
+            entry("release", json!([2])),
+            entry("halt", json!([])),
+        ])));
+        let chosen = |checkpoint: Option<u8>| {
+            config
+                .default_ruling_for(checkpoint)
+                .map(|ruling| ruling.id.as_str())
+        };
+
+        assert_eq!(chosen(Some(1)), Some("plan"));
+        assert_eq!(
+            chosen(Some(2)),
+            Some("release"),
+            "the halt is unscoped and earlier than nothing, but the release wording applies at \
+             checkpoint 2 and is the one `Enter` must send there"
+        );
+        // No checkpoint this console recognises: today's behaviour, the first configured ruling.
+        assert_eq!(chosen(None), Some("plan"));
+        assert_eq!(
+            config.default_ruling().map(|ruling| ruling.id.as_str()),
+            Some("plan")
+        );
+        // A checkpoint no wording is written for: nothing to send, and the caller refuses.
+        assert_eq!(
+            chosen(Some(3)),
+            Some("halt"),
+            "the unscoped halt is the one wording that covers a checkpoint neither scoped one names"
+        );
+
+        // A checkpoint no wording at all covers: nothing to send, and the caller refuses rather than
+        // sending a wording written for another checkpoint.
+        let plan_only = config_with(console_with(json!([entry("plan", json!([1]))])));
+        assert!(
+            plan_only.default_ruling_for(Some(2)).is_none(),
+            "only a checkpoint-1 wording exists, so checkpoint 2 has no default"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_named_only_by_the_halt_still_has_a_default() {
+        // Every ruling scoped to 1 and one unscoped halt: at checkpoint 2 the halt is the only
+        // applicable wording, so `Enter` sends that rather than nothing.
+        let config = config_with(console_with(json!([
+            entry("plan", json!([1])),
+            entry("halt", json!([])),
+        ])));
+        assert_eq!(
+            config.default_ruling_for(Some(2)).map(|r| r.id.as_str()),
+            Some("halt")
+        );
+    }
+
+    #[test]
+    fn the_embedded_defaults_carry_the_same_rulings_as_the_config_file() {
+        // Three copies of this list exist on purpose -- `agentic.config.json`, this crate's embedded
+        // defaults and `scripts/agentic_config.py`'s `DEFAULT` -- and the file is the one a fork
+        // edits. This check is the one the build can make: the file and the embedded fallback must
+        // agree on the wording, the order and the checkpoint scoping, or a repository with no
+        // readable config would offer a different ruling than the file it replaced.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG_FILENAME);
+        let text = std::fs::read_to_string(&path).expect("this repository's own config file");
+        let root: Value = serde_json::from_str(&text).expect("the config file is valid JSON");
+        let console = root
+            .get("console")
+            .expect("the config carries a console block");
+        assert_eq!(
+            Console::from_value(console).rulings,
+            Console::default().rulings,
+            "console.rulings in {CONFIG_FILENAME} and the embedded defaults disagree"
+        );
+    }
 }

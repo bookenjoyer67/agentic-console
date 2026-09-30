@@ -365,6 +365,16 @@ pub fn checkpoint_name(index: u8) -> String {
     }
 }
 
+/// The checkpoint number a canonical name carries, for the reads that have to scope a ruling to it.
+///
+/// Written as the inverse of `checkpoint_name` rather than as a second list of names, so the two
+/// cannot drift. A name the console did not write itself names no checkpoint: a ruling scoped to
+/// checkpoint 1 must not be offered because some other string happened to contain a `1`, and the
+/// placeholder a card carries when nothing named a checkpoint names none either.
+pub fn checkpoint_index(name: &str) -> Option<u8> {
+    (1u8..=2).find(|index| checkpoint_name(*index) == name)
+}
+
 /// The question a checkpoint asks, as the orchestration's ordered sequence frames it.
 fn checkpoint_question(which: &str) -> String {
     if which.contains("CHECKPOINT 1") {
@@ -789,17 +799,50 @@ fn agent_process<'a>(cfg: &Config, probes: &'a Probes) -> Option<&'a crate::prob
         .find(|row| row.is_agent(&cfg.console.claude_command) && row.command.contains("-p"))
 }
 
-/// The newest line of a transcript tail that names a checkpoint, with the checkpoint it named and
-/// the words around the mention, so the card can quote the run's own sentence.
-fn newest_mention(lines: &[String]) -> Option<(String, String)> {
-    let mut found: Option<(String, String)> = None;
+/// Whether a transcript line is a turn the **human** wrote, rather than the run's own words or a
+/// tool result filed under the same record type.
+///
+/// Claude Code writes the human's prompts, its attachments and every tool result as `type: user`,
+/// so the type alone does not say who is speaking. The payload is what separates them: a human turn
+/// carries prose, and a tool turn carries a `tool_result` / `toolUseResult` block.
+fn human_authored(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return false;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("user") {
+        return false;
+    }
+    let envelope = value.to_string();
+    !envelope.contains("tool_result") && !envelope.contains("toolUseResult")
+}
+
+/// The newest line of a transcript tail that names a checkpoint, with the checkpoint it named, the
+/// words around the mention, and whether the turn that named it was the human's.
+///
+/// A mention in the **human's** turn outranks one in the run's. Only one of the two is a statement
+/// about where the run stands: a ruling the human sent names the checkpoint it was written for,
+/// while a run's own closing summary is where this console has twice read the checkpoint the run
+/// *offered to reach next* -- `then `planner`, then Checkpoint 1`, and `I route it to
+/// `project-manager` then `planner`, and stop at Checkpoint 1 for your approval`. Both of those are
+/// menus of next steps, not statements of a stop, and both were the newest mention in their file.
+/// The run's own words still name the checkpoint whenever no human turn names one.
+fn newest_mention(lines: &[String]) -> Option<(String, String, bool)> {
+    let mut human: Option<(String, String)> = None;
+    let mut spoken: Option<(String, String)> = None;
     for line in lines {
         let text = readable_line(line);
         if let Some((name, position)) = named_mention(&text) {
-            found = Some((name, quote_around(&text, position)));
+            let quoted = quote_around(&text, position);
+            if human_authored(line) {
+                human = Some((name.clone(), quoted.clone()));
+            }
+            spoken = Some((name, quoted));
         }
     }
-    found
+    match human {
+        Some((name, quoted)) => Some((name, quoted, true)),
+        None => spoken.map(|(name, quoted)| (name, quoted, false)),
+    }
 }
 
 /// The last segment of a container path: the file name, for the lines that label a read.
@@ -901,10 +944,15 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
                 short_id(id)
             )),
             Some(read) => match newest_mention(&read.lines) {
-                Some((name, line)) => {
+                Some((name, line, from_human)) => {
+                    let whose = if from_human {
+                        "the human's own turn"
+                    } else {
+                        "the run's own words"
+                    };
                     let from = format!(
                         "the session's own transcript {} (age {}, {} line(s) read from its tail): \
-                         \"{}\" is the run's own words and names {name}",
+                         \"{}\" is {whose} and names {name}",
                         read.path,
                         session_age,
                         read.lines.len(),
@@ -999,7 +1047,7 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
             .first()
             .is_some_and(|file| file.path == tail.file.path);
         match newest_mention(&tail.lines) {
-            Some((name, line)) if mine => {
+            Some((name, line, _)) if mine => {
                 let from = format!(
                     "the evidence directory's own copy of this session, {path} (age {age}, {whose}): \
                      \"{}\" names {name}",
@@ -1014,12 +1062,12 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
                     ),
                 });
             }
-            Some((name, line)) if newest => directory.push(format!(
+            Some((name, line, _)) if newest => directory.push(format!(
                 "the transcript {path} (age {age}, {whose}) names {name} (\"{}\") and is not \
                  attributable to this card's session, so it is IGNORED",
                 short_quote(&line)
             )),
-            Some((name, line)) => directory.push(format!(
+            Some((name, line, _)) => directory.push(format!(
                 "another transcript there, {path} (age {age}, {whose}) names {name} (\"{}\") and is \
                  not attributable to this card's session, so it is IGNORED",
                 short_quote(&line)
@@ -1066,7 +1114,7 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
                         .iter()
                         .find(|tail| tail.file.path == newest.path)
                         .and_then(|tail| newest_mention(&tail.lines))
-                        .map(|(name, _)| name);
+                        .map(|(name, _, _)| name);
                     let mine = newest
                         .session_id
                         .as_deref()
@@ -1293,9 +1341,12 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
     let can_approve = refuse_reason.is_none();
     // The command preview is the command the default canned ruling would build -- the one `Enter`
     // reaches in one keystroke -- so the card shows the exact argv that key would confirm, not a
-    // placeholder. A config with no canned ruling falls back to the placeholder, as before.
+    // placeholder. That ruling is the first one written for the checkpoint this card reads, so the
+    // preview follows the checkpoint and not the config's order: a wording written for checkpoint 1
+    // must not be shown as what `Enter` sends at checkpoint 2, which is the whole of this
+    // scoping. A config with nothing written for this checkpoint falls back to the placeholder.
     let preview_value = cfg
-        .default_ruling()
+        .default_ruling_for(checkpoint_index(&resolved))
         .map(|ruling| ruling.text.clone())
         .unwrap_or_else(|| "<your ruling text>".to_string());
     let command_preview = match actions::build(
@@ -1494,5 +1545,75 @@ mod tests {
         );
         let unmoved = format!("{}then Checkpoint 1", "é".repeat(BEFORE_CHARS + 30));
         assert_eq!(mentioned(&unmoved), None);
+    }
+
+    /// A human turn, as the CLI writes one.
+    fn human_turn(text: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "s",
+            "message": { "content": [{ "type": "text", "text": text }] }
+        })
+        .to_string()
+    }
+
+    /// A tool result, as the CLI writes one: `type: user`, and not the human speaking.
+    fn tool_turn(text: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "s",
+            "toolUseResult": { "stdout": text },
+            "message": { "content": [{ "type": "tool_result", "content": text }] }
+        })
+        .to_string()
+    }
+
+    /// A run turn, as the CLI writes one.
+    fn run_turn(text: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s",
+            "message": { "content": [{ "type": "text", "text": text }] }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_human_turn_outranks_the_runs_own_menu() {
+        // Verbatim from the transcript that flipped this card back: the human's ruling names the
+        // checkpoint it was written for, and the run's later message offers a route naming the other
+        // one. The run's message is newest, and it is the one that must not decide the card.
+        let tail = vec![
+            human_turn("Operator to orchestrator. Human Checkpoint 2 ruling for act 2 v2."),
+            tool_turn("Human Checkpoint 1 reached"),
+            run_turn(
+                "- `plan: <one sentence>` — a new change request; I route it to `project-manager` \
+                 then `planner`, and stop at Checkpoint 1 for your approval.",
+            ),
+        ];
+        assert_eq!(
+            newest_mention(&tail).map(|(name, _, from_human)| (name, from_human)),
+            Some(("HUMAN CHECKPOINT 2 (release approval)".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn the_runs_words_still_name_the_checkpoint_when_no_human_turn_does() {
+        let tail = vec![
+            tool_turn("Human Checkpoint 2 reached"),
+            run_turn("**Stopping at Human Checkpoint 1.** Status: halted at Human Checkpoint 1."),
+        ];
+        assert_eq!(
+            newest_mention(&tail).map(|(name, _, from_human)| (name, from_human)),
+            Some(("HUMAN CHECKPOINT 1 (plan approval)".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn a_tool_result_is_not_a_human_turn() {
+        assert!(human_authored(&human_turn("close the ticket")));
+        assert!(!human_authored(&tool_turn("Checkpoint 1 reached")));
+        assert!(!human_authored(&run_turn("Checkpoint 1 reached")));
+        assert!(!human_authored("not JSON at all"));
     }
 }

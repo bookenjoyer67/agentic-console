@@ -102,10 +102,13 @@ impl ActionKind {
             ActionKind::Brief => "Change request for this repository, in one sentence: make the \
                                   SCHEMA doc clean under rule R1. Repository path: /workspace"
                 .to_string(),
-            ActionKind::Ruling => cfg
-                .default_ruling()
-                .map(|ruling| ruling.text.clone())
-                .unwrap_or_else(|| "Approved. Proceed with the plan as written.".to_string()),
+            ActionKind::Ruling => match cfg.rulings().iter().find(|r| r.checkpoints.is_empty()) {
+                // The dry run holds no card, so it shows only a wording that answers to no
+                // checkpoint in particular: a ruling scoped to checkpoint 1 would be a wrong
+                // example at checkpoint 2, which is the mistake the scoping exists to prevent.
+                Some(ruling) => ruling.text.clone(),
+                None => "<the first ruling written for the checkpoint the card reads>".to_string(),
+            },
             _ => String::new(),
         }
     }
@@ -197,6 +200,14 @@ pub struct Command {
     /// decision was made on rather than a state that may have changed since.
     pub guards: Guards,
     pub argv: Vec<String>,
+    /// The value this command was built from: the ruling's text, the brief, the gate name, the role
+    /// line.
+    ///
+    /// Kept as its own field rather than read back out of `argv`, because `argv` is shaped by the
+    /// program being run (the `-p <value>` an agent takes) and this crate must not parse another
+    /// program's grammar to learn what it just sent. The reply guard compares it against the next
+    /// ruling's text, so the same words into a run that has not moved can be refused.
+    pub value: String,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     /// Files the console itself writes before running: host-side, never inside the repository.
@@ -369,6 +380,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv: vec!["bash".to_string(), relative.clone()],
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),
@@ -388,6 +400,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: vec![
@@ -421,6 +434,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),
@@ -474,6 +488,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),
@@ -521,6 +536,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),
@@ -576,6 +592,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),
@@ -650,6 +667,7 @@ pub fn build(
             Ok(Command {
                 kind,
                 guards,
+                value: value.to_string(),
                 argv,
                 cwd: cfg.repo.clone(),
                 env: Vec::new(),

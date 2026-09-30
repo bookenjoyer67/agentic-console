@@ -2318,6 +2318,7 @@ fn start_throwaway_action(app: &mut App, script: &str) {
     let command = actions::Command {
         kind: ActionKind::Gate,
         guards: Guards::default(),
+        value: String::new(),
         argv: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
         cwd: std::env::temp_dir(),
         env: Vec::new(),
@@ -2580,9 +2581,9 @@ fn enter_reaches_the_confirmation_for_the_default_ruling_and_starts_nothing() {
     let mut app = live_with_an_offered_ruling(&fixture);
     let default = app
         .config
-        .default_ruling()
+        .default_ruling_for(Some(1))
         .cloned()
-        .expect("the config carries a default ruling");
+        .expect("the config carries a default ruling for checkpoint 1");
 
     press(&mut app, KeyCode::Enter);
 
@@ -2743,7 +2744,7 @@ fn a_ruling_text_changed_in_the_config_changes_the_command_that_is_built() {
     let mut app = live_with_an_offered_ruling(&fixture);
     assert_eq!(
         app.config
-            .default_ruling()
+            .default_ruling_for(Some(1))
             .map(|ruling| ruling.text.as_str()),
         Some(marker),
         "the config replaced the wording"
@@ -2777,13 +2778,13 @@ fn a_ruling_text_changed_in_the_config_changes_the_command_that_is_built() {
         "a ruling the config does not carry is not offered"
     );
 
-    // A repository with no `console.rulings` still gets this repository's three, so the fallback is
+    // A repository with no `console.rulings` still gets this repository's rulings, so the fallback is
     // the embedded default rather than an empty chooser.
     let bare = Fixture::build("ruling-wording-compiled-default");
     assert_eq!(
         bare.config().rulings().len(),
-        3,
-        "a config without rulings falls back to the embedded three"
+        6,
+        "a config without rulings falls back to the embedded six"
     );
 }
 
@@ -2969,5 +2970,289 @@ fn the_chooser_prefills_the_amendable_rulings_and_opens_free_text_empty() {
             .iter()
             .map(|line| line.text.clone())
             .collect::<Vec<String>>()
+    );
+}
+
+// --- A ruling is written for a checkpoint, and a sent ruling is not sent twice -------------------
+//
+// The defect this section exists for: a run stopped at HUMAN CHECKPOINT 2 (release approval) and the
+// operator pressed `Enter`, which sent the default -- the plan approval written for checkpoint 1.
+// The run refused it (there is no plan at the release stage), halted, and offered the same default
+// again, so the operator sent byte-identical text twice and stayed stuck. Two guards fix it at the
+// console: `Enter` sends a ruling *written for the open checkpoint* (or refuses), and a ruling whose
+// exact text was already sent into a session whose transcript has not moved is refused rather than
+// repeated.
+
+/// An app on the LIVE tab whose card reads HUMAN CHECKPOINT 2 and offers a ruling.
+///
+/// The session's own transcript is the read that names checkpoint 2, and the storage journal is given
+/// an implementer record so its shape names no checkpoint either: two reads naming two different
+/// checkpoints would offer no ruling at all, which is a different (already tested) behaviour.
+fn live_at_checkpoint_2(fixture: &Fixture) -> App {
+    write(
+        &fixture.repo.join(".memory/storage-audit.log"),
+        &store_line("implementer", "update_entry"),
+    );
+    let mut app = app_with_transcript(
+        fixture,
+        session_reading(vec![session(SESSION_A, 40)]),
+        transcript(
+            SESSION_A,
+            &[transcript_record(
+                SESSION_A,
+                "The reviewer's verdict is recorded, so I am **stopping at Human Checkpoint 2, \
+                 release approval**.",
+            )],
+        ),
+    );
+    app.tab = Tab::Live;
+    assert!(
+        app.card().which.contains("HUMAN CHECKPOINT 2"),
+        "the card reads checkpoint 2: {}",
+        app.card().which
+    );
+    assert!(
+        app.ruling_offerable(),
+        "checkpoint 2 offers a ruling with one session named: {}",
+        app.card().session.line()
+    );
+    app
+}
+
+/// The exact failure: at release approval `Enter` must not send the plan approval, and must send the
+/// wording written for the release checkpoint instead.
+#[test]
+fn enter_at_release_approval_sends_the_release_wording_and_never_the_plan_approval() {
+    let fixture = Fixture::build("enter-at-release");
+    let mut app = live_at_checkpoint_2(&fixture);
+
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        app.mode_name(),
+        "confirm",
+        "`Enter` still reaches the confirmation in one keystroke"
+    );
+    let command = confirmed_command(&app);
+    assert!(
+        !command.contains("Approved. Proceed with the plan as written."),
+        "the plan approval must never be sent at release approval: {command}"
+    );
+    assert!(
+        command.contains("Approved: release as written. Close the ticket and stop."),
+        "the wording written for checkpoint 2 is what `Enter` sends: {command}"
+    );
+    assert!(
+        command.contains(&format!("--resume {SESSION_A}")),
+        "and it still resumes the session the card names: {command}"
+    );
+
+    press(&mut app, KeyCode::Char('n'));
+    assert!(!started_anything(&app), "nothing was sent");
+}
+
+/// The other half of the rule: a checkpoint no canned ruling is written for is *refused*, not
+/// answered with the other checkpoint's wording.
+#[test]
+fn enter_refuses_rather_than_sending_another_checkpoints_ruling() {
+    let fixture = Fixture::build("enter-refused-at-release");
+    // Only the plan-approval wordings: at release approval nothing canned applies, so `Enter` must
+    // refuse instead of sending a plan approval the run will reject.
+    set_rulings(
+        &fixture.repo,
+        serde_json::json!([
+            {"id": "approve-as-written", "label": "approve as written", "text": "Approved. Proceed with the plan as written.", "prefill": false, "checkpoints": [1]},
+            {"id": "approve-with-rework", "label": "approve with a rework first", "text": "Approved with one rework first: revise the plan.", "prefill": true, "checkpoints": [1]},
+        ]),
+    );
+    let mut app = live_at_checkpoint_2(&fixture);
+
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        app.mode_name(),
+        "normal",
+        "`Enter` refuses instead of opening a confirmation for a mismatched ruling"
+    );
+    assert!(
+        app.status.contains(
+            "no canned ruling in console.rulings is written for HUMAN CHECKPOINT 2 \
+                 (release approval)"
+        ) && app.status.contains("press e to choose or write one"),
+        "the refusal names the checkpoint and what to do next: {}",
+        app.status
+    );
+    assert!(
+        !app.status
+            .contains("Approved. Proceed with the plan as written."),
+        "no wording from the other checkpoint is offered: {}",
+        app.status
+    );
+    assert!(!started_anything(&app), "nothing was sent");
+
+    // `e` still opens the free-text box, so the operator can write the ruling that fits.
+    press(&mut app, KeyCode::Char('e'));
+    assert!(
+        matches!(&app.mode, Mode::Input { kind, .. } if *kind == ActionKind::Ruling),
+        "with nothing canned for this checkpoint, `e` opens the free-text box directly: {:?}",
+        app.mode
+    );
+    assert_eq!(box_text(&app), "", "the free-text box opens empty");
+    typed(
+        &mut app,
+        "Approved: release as written. Close the ticket and stop.",
+    );
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode_name(),
+        "confirm",
+        "a written ruling reaches the confirmation"
+    );
+    assert!(!started_anything(&app), "nothing was sent");
+    press(&mut app, KeyCode::Char('n'));
+}
+
+/// The chooser offers the applicable rulings only, numbered contiguously, with the free-text row last
+/// -- so the number the operator reads is a ruling they can actually send at this checkpoint.
+#[test]
+fn the_chooser_lists_only_the_rulings_written_for_the_open_checkpoint() {
+    let fixture = Fixture::build("chooser-per-checkpoint");
+    let mut app = live_at_checkpoint_2(&fixture);
+
+    let applicable: Vec<String> = app
+        .applicable_rulings()
+        .into_iter()
+        .map(|ruling| ruling.label.clone())
+        .collect();
+    assert_eq!(
+        applicable,
+        vec![
+            "release as written",
+            "release, with a follow-up",
+            "hold the ticket open",
+            "halt",
+        ],
+        "the applicable list is the three release wordings plus the unscoped halt, in config order"
+    );
+    assert_eq!(
+        app.chooser_rows(),
+        applicable.len() + 1,
+        "the rows are the applicable rulings then one free-text row, so the numbers stay contiguous"
+    );
+
+    press(&mut app, KeyCode::Char('e'));
+    let chooser = frame_text(&app, 230, 60);
+    for label in &applicable {
+        assert!(
+            chooser.contains(label),
+            "the chooser names the applicable ruling {label}\n{chooser}"
+        );
+    }
+    assert!(
+        !chooser.contains("approve as written") && !chooser.contains("approve with a rework first"),
+        "no checkpoint-1 wording is a row at checkpoint 2\n{chooser}"
+    );
+
+    // Row 1 is the release wording, sent as written, so it reaches the confirmation directly.
+    press(&mut app, KeyCode::Char('1'));
+    let command = confirmed_command(&app);
+    assert!(
+        command.contains("Approved: release as written. Close the ticket and stop.")
+            && !command.contains("Approved. Proceed with the plan as written."),
+        "the chooser's row 1 is the first *applicable* ruling, not the first configured one: {command}"
+    );
+    press(&mut app, KeyCode::Char('n'));
+
+    // A digit past the last applicable ruling is not a ruling and not a tab: the chooser stays open.
+    press(&mut app, KeyCode::Char('e'));
+    press(&mut app, KeyCode::Char('5'));
+    assert_eq!(
+        app.mode_name(),
+        "choose",
+        "a digit with no ruling behind it leaves the chooser open"
+    );
+    press(&mut app, KeyCode::Esc);
+    assert!(
+        !started_anything(&app),
+        "nothing this test did sent a ruling"
+    );
+}
+
+/// The reply guard: the identical ruling, into the same session, while the transcript has not grown,
+/// is refused in the run's own terms -- and a different ruling advances it.
+#[test]
+fn the_same_ruling_sent_twice_into_an_unmoved_run_is_refused() {
+    let fixture = Fixture::build("ruling-replay");
+    let mut app = live_with_an_offered_ruling(&fixture);
+    let default_text = app
+        .config
+        .default_ruling_for(Some(1))
+        .expect("a default ruling for checkpoint 1")
+        .text
+        .clone();
+
+    // The first send: `Enter` reaches the confirmation and the confirmation key accepts it. The guard
+    // records the console's own act of sending; whether the child process itself exists in this
+    // environment is not what the record is about.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode_name(), "confirm");
+    press(&mut app, KeyCode::Char('y'));
+    assert_eq!(app.mode_name(), "normal");
+
+    // The same words again, into the same session, with the transcript read unchanged: refused.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode_name(),
+        "normal",
+        "the identical ruling is refused instead of opening the confirmation again"
+    );
+    assert!(
+        app.status.contains("was already sent into session")
+            && app.status.contains("run's stop is unchanged"),
+        "the refusal is in the run's own terms: {}",
+        app.status
+    );
+    assert!(
+        app.status
+            .contains("press e to choose a different ruling, or type a different one"),
+        "and it says what advances the run: {}",
+        app.status
+    );
+
+    // A DIFFERENT ruling is not the replay, so it is allowed.
+    press(&mut app, KeyCode::Char('e'));
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(
+        app.mode_name(),
+        "input",
+        "the second checkpoint-1 ruling is amendable, so it opens the box"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode_name(),
+        "confirm",
+        "a different ruling is not refused by the reply guard"
+    );
+    press(&mut app, KeyCode::Char('n'));
+
+    // Once the run's transcript HAS moved, the same words are allowed again: the rule is about a run
+    // that did not move, not about sending.
+    app.snapshot.live.session_transcript_lines = Some(7);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode_name(),
+        "confirm",
+        "a run whose transcript has grown is not a replay"
+    );
+    assert!(
+        confirmed_command(&app).contains(&default_text),
+        "and it is the same default wording that is offered again: {}",
+        confirmed_command(&app)
+    );
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(
+        app.mode_name(),
+        "normal",
+        "the re-offered ruling was cancelled at the confirmation, not sent"
     );
 }
