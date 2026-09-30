@@ -39,11 +39,11 @@ What does a newcomer need before the runtime works?
 
 ## Continuous integration
 
-Two workflows, and they check different things.
+Which workflow checks what, and when does it run?
 
 | workflow | trigger | what it runs |
 | --- | --- | --- |
-| `ci.yml` | pull requests | the pipeline itself: change classification, the policy suite inside the sandbox image, the three cargo gates, the conformance gate, the retrieval ground-truth harness, an advisory review, and the audit trail assembled from all of it |
+| `ci.yml` | pull requests | the pipeline: classification, the policy suite in the sandbox image, the cargo gates, the conformance gate, the retrieval harness, an advisory review, and the audit trail |
 | `main-gate.yml` | pushes to `main` | the three cargo gates and the conformance gate, because a commit that lands on `main` should not be the first thing anyone checks |
 
 The pipeline workflow runs on pull requests because its change classifier reads the pull request's base sha.
