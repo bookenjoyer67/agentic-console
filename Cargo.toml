@@ -1,0 +1,25 @@
+[package]
+name = "agentic-console"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal window onto a repository's agentic quality-gate artifacts. Read-only by construction."
+license = "MIT"
+
+# Its own workspace root, deliberately. The kit's Cargo.toml lists its three members explicitly and
+# is cited by line number in docs/contract-audit (Cargo.toml:13, the uuid feature), so adding an
+# `exclude` there would shift a resolved citation. An empty [workspace] table here makes this crate
+# its own root instead: `cargo build` works inside console/, and the kit's `cargo test --workspace`
+# never sees it, so its dependency tree and lockfile stay exactly as they were.
+[workspace]
+
+[[bin]]
+name = "agentic-console"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2

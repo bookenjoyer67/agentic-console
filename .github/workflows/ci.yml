@@ -1,0 +1,32 @@
+name: gate
+
+# The console's own gate. It is small on purpose, and it is the same three commands the crate's
+# documentation tells a reader to run. Every step here passes on the committed tree.
+#
+# This crate is its own workspace root, so no --manifest-path is needed and no workspace flag applies.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: format
+        run: cargo fmt --check
+
+      - name: lint
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test --release
