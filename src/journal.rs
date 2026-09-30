@@ -43,6 +43,14 @@ impl GateEntry {
 }
 
 /// One line of the storage journal: one authorised or refused storage call.
+///
+/// The journal is the audit log and records the *event* -- which role called which operation against
+/// which entry id -- never the stored record's title or body; `mcp/storage/SCHEMA.md` lists the
+/// audit record's keys and no title is among them. `title` is therefore filled in two ways: from the
+/// journal line itself when a line carries one, and otherwise from the storage database beside the
+/// journal, whose `entries` table the server's own `list_entries` reads metadata (including the
+/// title) out of. It is what lets the console tell a close from the verdict before it: see
+/// `checkpoint::states_a_close`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreEntry {
     pub timestamp: String,
@@ -53,6 +61,8 @@ pub struct StoreEntry {
     pub classification: String,
     pub allowed: bool,
     pub reason: String,
+    /// The stored record's own title, or empty when the console could not read one.
+    pub title: String,
 }
 
 impl StoreEntry {
@@ -150,6 +160,7 @@ pub fn parse_storage_journal(text: &str, limit: usize) -> Vec<StoreEntry> {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             reason: field(record, "reason"),
+            title: field(record, "title"),
         })
         .collect();
     if entries.len() > limit {
@@ -183,4 +194,36 @@ where
     F: Fn(&'a T) -> &'a str,
 {
     entries.iter().rev().find(|entry| role(entry) == wanted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_storage_record_carries_its_own_title_when_the_line_names_one() {
+        // The audit record the storage server writes has no title (see `StoreEntry`), so this is the
+        // read that catches a line that *does* name one -- and an id with none stays empty rather
+        // than borrowing another record's title.
+        let line = "{\"allowed\": true, \"calling_role\": \"reviewer\", \
+                    \"classification\": \"internal\", \"entry_id\": \"3794f97e-976e-4d0b-8507-de28a56f2ab0\", \
+                    \"operation\": \"write_entry\", \"project_id\": \"proj-komun\", \"reason\": null, \
+                    \"timestamp\": \"2026-09-30T17:28:16.869579+00:00\", \
+                    \"title\": \"Closing record — act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope\"}\n";
+        let entries = parse_storage_journal(line, 12);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "reviewer");
+        assert_eq!(
+            entries[0].title,
+            "Closing record — act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope"
+        );
+
+        let untitled = parse_storage_journal(
+            "{\"allowed\": true, \"calling_role\": \"planner\", \"entry_id\": \"e\", \
+             \"operation\": \"write_entry\", \"timestamp\": \"2026-09-30T15:11:10.247308+00:00\"}\n",
+            12,
+        );
+        assert_eq!(untitled.len(), 1);
+        assert!(untitled[0].title.is_empty());
+    }
 }

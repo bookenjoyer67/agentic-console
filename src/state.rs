@@ -928,11 +928,29 @@ fn read_gate_journal(cfg: &Config, at: SystemTime) -> Reading<(Vec<GateEntry>, u
     Reading::ok((last, total), journal_source(cfg, "gate-audit.log"), at)
 }
 
-/// The storage journal's last records.
+/// The storage journal's last records, with each record's own title where the console can read it.
+///
+/// The journal itself is the audit log and carries no title (see `journal::StoreEntry`), so the
+/// titles come from the storage database beside it -- the metadata the server's own `list_entries`
+/// exposes. A database the console cannot read leaves the titles empty, and a record with no title
+/// is a record that names no close: nothing is invented to fill the gap.
 fn read_storage_journal(cfg: &Config, at: SystemTime) -> Reading<Vec<StoreEntry>> {
-    let (entries, _) = read_journal(cfg, "storage-audit.log", at, |text| {
+    let (mut entries, _) = read_journal(cfg, "storage-audit.log", at, |text| {
         (journal::parse_storage_journal(text, 12), 0)
     });
+    let titles = cfg
+        .journal_named("storage-audit.log")
+        .and_then(|audit| audit.parent().map(|dir| dir.join("storage.db")))
+        .and_then(|db| probe::storage_entry_titles(&db).ok());
+    if let Some(titles) = titles {
+        for entry in &mut entries {
+            if entry.title.is_empty() {
+                if let Some(title) = titles.get(&entry.entry_id) {
+                    entry.title = title.clone();
+                }
+            }
+        }
+    }
     Reading::ok(entries, journal_source(cfg, "storage-audit.log"), at)
 }
 
@@ -1559,7 +1577,10 @@ fn lane_b(cfg: &Config, probes: &Probes) -> Lane {
                         entry.short_id()
                     )]
                 })
-                .unwrap_or_else(|| vec!["no storage-journal record for this role".to_string()]),
+                .unwrap_or_else(|| {
+                    vec![cannot_write_journal(probes, &role)
+                        .unwrap_or_else(|| "no storage-journal record for this role".to_string())]
+                }),
         });
     }
     let mut footnote =
@@ -1586,6 +1607,66 @@ fn lane_b(cfg: &Config, probes: &Probes) -> Lane {
             .collect(),
         footnote,
     }
+}
+
+/// The tools the grant map gives `role` that write to project memory: `write_entry`, `update_entry`
+/// or `delete_entry`. An empty list means no storage-journal record for that role can exist at all.
+///
+/// `delete_entry` is granted to no role in `docs/routing-and-tool-grant-map.json`, and the role that
+/// owns the ticket holds none of the three **by design**: `mcp/storage/allow-list.json`'s
+/// `denial_note_by_role` says of `project-manager` "refused write_entry, update_entry and
+/// delete_entry: it owns ticket state rather than persistent project memory", and that file's own
+/// `comment` states it is "Derived from docs/routing-and-tool-grant-map.json ... and nothing else
+/// does". So the absence is policy, not a gap, and the console reports it as policy.
+fn storage_write_tools(probes: &Probes, role: &str) -> Vec<String> {
+    probes
+        .grants
+        .value
+        .grants
+        .get(role)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter(|tool| {
+                    matches!(
+                        tool.as_str(),
+                        "mcp__storage__write_entry"
+                            | "mcp__storage__update_entry"
+                            | "mcp__storage__delete_entry"
+                    )
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Why a role has no storage-journal record, when the answer is not "it wrote none in this window".
+///
+/// `Some` when the grant map was read and gives the role no storage write tool: a record the role
+/// writes to the journal cannot exist, so the row says so and names the tool the role does hold
+/// instead of reading as missing evidence. `None` when the role may write to the journal and simply
+/// has no record in the window the console reads, or when the grant map itself could not be read.
+fn cannot_write_journal(probes: &Probes, role: &str) -> Option<String> {
+    if probes.grants.error.is_some() || !storage_write_tools(probes, role).is_empty() {
+        return None;
+    }
+    let held = probes
+        .grants
+        .value
+        .grants
+        .get(role)
+        .cloned()
+        .unwrap_or_default();
+    let named = if held.is_empty() {
+        "no tool at all".to_string()
+    } else {
+        held.join(", ")
+    };
+    Some(format!(
+        "its evidence is not observable in the storage journal: the grant map gives role '{role}' no \
+         storage write tool, so no journal record for it can exist -- it holds {named}"
+    ))
 }
 
 /// The light for one role step, from the last journal record and, for the tester, the gate journal.
@@ -1631,10 +1712,12 @@ fn step_state(
         ),
         None => (
             Light::Unknown,
-            format!(
-                "no storage-journal record for role '{role}' in the last {} entries",
-                probes.storage_journal.value.len()
-            ),
+            cannot_write_journal(probes, role).unwrap_or_else(|| {
+                format!(
+                    "no storage-journal record for role '{role}' in the last {} entries",
+                    probes.storage_journal.value.len()
+                )
+            }),
             storage_source,
         ),
     }

@@ -321,7 +321,7 @@ fn fixture_grant_map() -> String {
     "implementer": ["mcp__coursetools__file_write", "mcp__storage__update_entry"],
     "tester": ["mcp__gate__run_gate", "mcp__gate__list_gates", "mcp__storage__write_entry"],
     "reviewer": ["mcp__coursetools__file_read", "mcp__gate__read_audit_log"],
-    "project-manager": ["mcp__storage__list_entries"],
+    "project-manager": ["mcp__coursetools__task_tracker", "mcp__storage__read_entry", "mcp__storage__list_entries"],
     "researcher": ["mcp__retrieval__retrieve"]
   },
   "retrieval_ceiling": {
@@ -1743,6 +1743,20 @@ fn store_line(role: &str, operation: &str) -> String {
         "{{\"allowed\": true, \"calling_role\": \"{role}\", \"classification\": \"internal\", \
          \"entry_id\": \"fixture-{role}-0001\", \"operation\": \"{operation}\", \
          \"project_id\": \"proj-fixture\", \"reason\": null, \"timestamp\": \"{}\"}}\n",
+        stamp_now()
+    )
+}
+
+/// One storage-journal record carrying the stored record's own title, as the console reads it out of
+/// the storage database beside the journal: the audit record itself names no title, and this is what
+/// lets a close be told from the verdict before it.
+fn store_line_with_title(role: &str, operation: &str, title: &str) -> String {
+    let title = serde_json::to_string(title).expect("a JSON string");
+    format!(
+        "{{\"allowed\": true, \"calling_role\": \"{role}\", \"classification\": \"internal\", \
+         \"entry_id\": \"fixture-{role}-0001\", \"operation\": \"{operation}\", \
+         \"project_id\": \"proj-fixture\", \"reason\": null, \"timestamp\": \"{}\", \
+         \"title\": {title}}}\n",
         stamp_now()
     )
 }
@@ -3254,5 +3268,191 @@ fn the_same_ruling_sent_twice_into_an_unmoved_run_is_refused() {
         app.mode_name(),
         "normal",
         "the re-offered ruling was cancelled at the confirmation, not sent"
+    );
+}
+
+/// A close ends the run wherever it is written: the newest storage record says the change is
+/// finished, so the journal names no checkpoint even though a reviewer's verdict precedes it. The
+/// authoring role does not decide it, because the role that owns the ticket holds no memory write
+/// tool by design (`mcp/storage/allow-list.json`, `denial_note_by_role.project-manager`) -- so the
+/// console would wait forever for a record that can never be written.
+#[test]
+fn a_closing_record_ends_the_run_and_names_no_checkpoint() {
+    let fixture = Fixture::build("card-closed-run");
+    write(
+        &fixture.repo.join(".memory/storage-audit.log"),
+        &store_line_with_title(
+            "reviewer",
+            "write_entry",
+            "Closing record \u{2014} act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope, \
+             human-owned release decision, and carried standing findings",
+        ),
+    );
+    let mut app = app_with_transcript(
+        &fixture,
+        session_reading(vec![session(SESSION_A, 30)]),
+        transcript(
+            SESSION_A,
+            &[transcript_record(SESSION_A, "Nothing further to report.")],
+        ),
+    );
+    app.tab = Tab::Live;
+
+    let card = app.snapshot.live.checkpoint.clone();
+    assert!(
+        !card.which.contains("CHECKPOINT"),
+        "a closed run names no checkpoint: {}",
+        card.which
+    );
+    assert_eq!(
+        card.state,
+        CardState::Idle,
+        "no read names a checkpoint and no process is running"
+    );
+    assert!(
+        !card.can_approve,
+        "there is nothing for a ruling to resume in a closed run"
+    );
+    let line = evidence_line(&card, "the newest storage record is a close");
+    assert!(
+        line.contains("reviewer"),
+        "the card says which role wrote the close: {line}"
+    );
+    assert!(
+        line.contains("Closing record"),
+        "and quotes the record's own title as the read it rests on: {line}"
+    );
+
+    let text = frame_text(&app, 230, 60);
+    assert!(
+        text.contains("NO RUN, NO CHECKPOINT"),
+        "the card names no checkpoint at all\n{text}"
+    );
+    assert!(
+        !text.contains("STOPPED AT HUMAN CHECKPOINT 2"),
+        "the reviewer's verdict before the close is not read as an open checkpoint\n{text}"
+    );
+}
+
+/// A role the grant map gives no storage write tool cannot have a journal record, and the row says
+/// so -- naming the tool the role does hold -- instead of reading as missing evidence. The denial is
+/// policy, in `mcp/storage/allow-list.json`'s own words: the project-manager is "refused
+/// write_entry, update_entry and delete_entry: it owns ticket state rather than persistent project
+/// memory".
+#[test]
+fn a_role_with_no_storage_write_tool_reads_as_not_observable_not_missing() {
+    let fixture = Fixture::build("flow-role-without-a-journal");
+    let app = fixture.app();
+
+    let lane_b = app
+        .snapshot
+        .flow
+        .lanes
+        .iter()
+        .find(|lane| lane.key == 'B')
+        .expect("lane B is drawn");
+    let node = lane_b
+        .nodes
+        .iter()
+        .find(|node| node.label == "project-manager opens the ticket")
+        .expect("the ticket-opening step is drawn");
+    assert!(
+        node.status
+            .contains("not observable in the storage journal"),
+        "the row says its evidence is not observable rather than missing: {}",
+        node.status
+    );
+    assert!(
+        node.status
+            .contains("gives role 'project-manager' no storage write tool"),
+        "and says why: the grant map gives the role no write tool -- {}",
+        node.status
+    );
+    assert!(
+        node.status.contains("mcp__coursetools__task_tracker"),
+        "and names the tool the role does hold: {}",
+        node.status
+    );
+    assert!(
+        !node.status.contains("no storage-journal record"),
+        "the row no longer reads as a failure: {}",
+        node.status
+    );
+    assert!(
+        node.provenance
+            .iter()
+            .any(|line| line.contains("not observable in the storage journal")),
+        "the provenance line says the same thing: {:?}",
+        node.provenance
+    );
+
+    let text = frame_text(&app, 230, 60);
+    assert!(
+        text.contains("not observable in the storage journal"),
+        "the frame carries the honest row\n{text}"
+    );
+    assert!(
+        !text.contains("no storage-journal record for role 'project-manager'"),
+        "the row no longer reads as a failure\n{text}"
+    );
+}
+
+/// The run's standing menu offers a route for a *new* run; it is not a report of where this one
+/// stands, so the card must not read Checkpoint 1 out of it -- and so must not refuse the ruling for
+/// the checkpoint the journal does name. Verbatim from the closing summary that flipped this card
+/// while the run was closed.
+#[test]
+fn the_runs_standing_menu_offer_names_no_checkpoint_and_creates_no_disagreement() {
+    let fixture = Fixture::build("card-route-offer");
+    // The journal's newest record is the reviewer's verdict, which is checkpoint 2's own shape.
+    write(
+        &fixture.repo.join(".memory/storage-audit.log"),
+        &store_line("reviewer", "write_entry"),
+    );
+    let mut app = app_with_transcript(
+        &fixture,
+        session_reading(vec![session(SESSION_A, 40)]),
+        transcript(
+            SESSION_A,
+            &[transcript_record(
+                SESSION_A,
+                "- `plan: <one sentence>` \u{2014} a new change request; I route it to \
+                 `project-manager` then `planner`, and stop at Checkpoint 1 for your approval.",
+            )],
+        ),
+    );
+    app.tab = Tab::Live;
+
+    let card = app.snapshot.live.checkpoint.clone();
+    assert_eq!(card.state, CardState::Stopped);
+    assert!(
+        !card.which.contains("CHECKPOINT 1"),
+        "the menu's offer of a future run names no checkpoint: {}",
+        card.which
+    );
+    assert!(
+        card.which.contains("HUMAN CHECKPOINT 2"),
+        "the journal's own read stands: {}",
+        card.which
+    );
+    assert!(
+        card.checkpoint_conflict.is_none(),
+        "one read named a checkpoint, so there is no disagreement: {:?}",
+        card.checkpoint_conflict
+    );
+    assert!(
+        card.can_approve,
+        "the ruling for the checkpoint the journal names is offered: {}",
+        card.session.line()
+    );
+
+    let text = frame_text(&app, 230, 60);
+    assert!(
+        !text.contains("THE EVIDENCE DISAGREES"),
+        "the menu offer does not create a disagreement\n{text}"
+    );
+    assert!(
+        text.contains("STOPPED AT HUMAN CHECKPOINT 2"),
+        "the journal's read is the one the card shows\n{text}"
     );
 }

@@ -9,6 +9,7 @@
 //! * **A failure is a reading too.** A `docker` that is not on `PATH`, a journal that does not exist
 //!   and a container that is not running all become `Reading`s with an error, never a silent default.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -598,6 +599,61 @@ pub fn parse_gate_list(text: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// The titles of the storage database's own entries, keyed by entry id.
+///
+/// The storage journal is the audit log: it records that a write happened and under which id, and
+/// `mcp/storage/SCHEMA.md`'s own table of the audit record's keys carries no title. The title is
+/// *metadata* about the stored record, and the storage server's `list_entries` exposes it
+/// (`"SELECT entry_id, title, entry_type, classification, last_updated "`). The console reads the
+/// same metadata out of the database file beside the journal, with the `sqlite3` the sandbox image
+/// installs for exactly this inspection (`sandbox/Dockerfile.m3:39` `# sqlite3: inspect the storage
+/// server's database by hand`). The open is read-only, and a database that is absent or unreadable
+/// is a failed reading rather than a title invented for a record.
+pub fn storage_entry_titles(db: &Path) -> Result<BTreeMap<String, String>, String> {
+    if !db.is_file() {
+        return Err(format!("no storage database at {}", db.display()));
+    }
+    let argv = vec![
+        "sqlite3".to_string(),
+        "-readonly".to_string(),
+        "-json".to_string(),
+        db.display().to_string(),
+        "select entry_id, title from entries".to_string(),
+    ];
+    let out = run(&argv, None)?;
+    if !out.ok() {
+        return Err(out.stderr.trim().chars().take(300).collect::<String>());
+    }
+    parse_entry_titles(&out.stdout)
+}
+
+/// The rows `sqlite3 -json` returns for `select entry_id, title from entries`: an array of objects.
+///
+/// A row missing either field is skipped rather than completed from anything else, and an empty read
+/// is an empty map -- the console never invents a title for an id the database did not name.
+pub fn parse_entry_titles(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|error| format!("the storage database returned no JSON: {error}"))?;
+    let rows = value
+        .as_array()
+        .ok_or_else(|| "the storage database returned no row list".to_string())?;
+    let mut titles = BTreeMap::new();
+    for row in rows {
+        let (Some(id), Some(title)) = (
+            row.get("entry_id").and_then(serde_json::Value::as_str),
+            row.get("title").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        titles.insert(id.to_string(), title.to_string());
+    }
+    Ok(titles)
+}
+
 /// Whether each of `ports` accepts a TCP connection on the container's loopback.
 ///
 /// One `docker exec` probes all three, by opening a socket and closing it. Nothing is sent.
@@ -761,4 +817,37 @@ pub fn newest_with_prefix(dir: &Path, prefix: &str) -> Option<(PathBuf, SystemTi
 /// The current wall clock, as the console's single notion of "now".
 pub fn now() -> SystemTime {
     SystemTime::now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_storage_databases_row_list_is_read_as_titles_by_id() {
+        // What `sqlite3 -readonly -json <db> "select entry_id, title from entries"` prints for the
+        // row that closes a run. A row missing either field is skipped, and an empty read is an
+        // empty map: no title is invented for an id the database did not name.
+        let rows =
+            "[{\"entry_id\":\"3794f97e-976e-4d0b-8507-de28a56f2ab0\",\"title\":\"Closing record \
+                    — act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope\"},\
+                    {\"entry_id\":\"55ba0084-6863-4b1e-a246-ec1e01053edb\",\"title\":\"Finding: \
+                    task_tracker has no read path\"},{\"entry_id\":\"only-an-id\"}]";
+        let titles = parse_entry_titles(rows).expect("a row list is parsed");
+        assert_eq!(titles.len(), 2);
+        assert_eq!(
+            titles
+                .get("3794f97e-976e-4d0b-8507-de28a56f2ab0")
+                .map(String::as_str),
+            Some("Closing record — act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope")
+        );
+        assert!(!titles.contains_key("only-an-id"));
+        assert!(parse_entry_titles("")
+            .expect("nothing is not an error")
+            .is_empty());
+        assert!(parse_entry_titles("[]")
+            .expect("no rows is not an error")
+            .is_empty());
+        assert!(parse_entry_titles("not json").is_err());
+    }
 }

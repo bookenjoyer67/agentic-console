@@ -41,6 +41,7 @@ use serde_json::Value;
 use crate::actions::{self, ActionKind, Guards};
 use crate::config::Config;
 use crate::iso;
+use crate::journal::StoreEntry;
 use crate::probe;
 use crate::probe::SessionFile;
 use crate::state::{Light, Probes};
@@ -264,6 +265,85 @@ fn checkpoint_mentions(lowered: &str) -> Vec<(usize, u8)> {
     found
 }
 
+/// The phrases that mark a mention as part of an **offer to route** a future piece of work, rather
+/// than a report of where this run stands.
+///
+/// A finished run's closing summary ends with a menu: `- \`plan: <one sentence>\` -- a new change
+/// request; I route it to \`project-manager\` then \`planner\`, and stop at Checkpoint 1 for your
+/// approval.` That is an offer of a *new* run, and the `stop at` inside it is the future tense of a
+/// route, not a statement that this run is waiting. Read as a stop it outranks the run's own state
+/// and the card settles on a checkpoint the run is not at.
+const ROUTE_MARKERS: [&str; 8] = [
+    "i route it",
+    "i would route",
+    "i will route",
+    "route it to",
+    "then `planner`",
+    "then `project-manager`",
+    "a new change request",
+    "for your approval",
+];
+
+/// The phrases that report the state a run is **in**: past tense, or a named waiting state.
+///
+/// A line carrying one of these is a statement of where the run stands whatever else it holds, so a
+/// route offer beside it does not cancel it: `**Human checkpoint 2 -- WAITING (this is where the run
+/// has stopped)**` names a stop. `stopped at` is here and `stop at` is deliberately not, because a
+/// run writes `stopped at` about where it is and `stop at` about where it would stop next.
+const STATE_MARKERS: [&str; 7] = [
+    "stopped at",
+    "pending",
+    "waiting",
+    "awaiting",
+    "halted at",
+    "this is where the run is stopped",
+    "is stopped",
+];
+
+/// Whether a line offers a route for a future run rather than reporting the state of this one.
+///
+/// Asked in this order. A line that reports a state is never an offer, whatever else it holds. A
+/// routing verb (`I route it`, `then \`planner\``) makes the line an offer whichever checkpoint it
+/// names. A list item handing over a backticked command to run is one too, which is the menu's own
+/// shape (`- \`plan: <one sentence>\` -- ...`).
+///
+/// The conditional markers `stop at` / `stops at` belong to this vocabulary as well, and a run
+/// reporting its own state writes the past tense instead (`stopped at`, `STOPPED AT`, `PENDING`,
+/// `WAITING` -- all in `STATE_MARKERS`). They are deliberately **not** a disqualifier on their own,
+/// because this console's own evidence uses them for the stop itself: the brief it reads from a
+/// real container writes `Then STOP at human checkpoint 1 (plan approval). Print your run summary
+/// so far and wait.` and its test fixtures write `... stop at Checkpoint 1`, and both must keep
+/// naming their checkpoint. What separates the menu from those is the offer around the marker -- a
+/// routing verb or a backticked command -- and that is what this reads.
+fn offers_a_route(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    if STATE_MARKERS.iter().any(|phrase| lowered.contains(phrase)) {
+        return false;
+    }
+    if ROUTE_MARKERS.iter().any(|phrase| lowered.contains(phrase)) {
+        return true;
+    }
+    let trimmed = line.trim_start();
+    (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.contains('`')
+}
+
+/// The line of `lowered` that holds `position`, as a byte range.
+///
+/// A mention is judged by the line it is written on -- a menu line is an offer and a status line is
+/// not, whatever the two share -- so the offsets are found in the already-lowercased text, which is
+/// byte-for-byte the same length as the original.
+fn line_bounds(lowered: &str, position: usize) -> (usize, usize) {
+    let start = lowered[..position]
+        .rfind('\n')
+        .map(|at| at + 1)
+        .unwrap_or(0);
+    let end = lowered[position..]
+        .find('\n')
+        .map(|at| position + at)
+        .unwrap_or(lowered.len());
+    (start, end)
+}
+
 /// The checkpoint a piece of text names, and where in the text the mention is.
 ///
 /// The newest mention wins, because both places a run names a checkpoint end with the decision it
@@ -282,6 +362,13 @@ fn named_mention(text: &str) -> Option<(String, usize)> {
     for (position, index) in checkpoint_mentions(&lowered) {
         let after = mention_window(&lowered, position, 0, AFTER_CHARS);
         if NEGATIONS.iter().any(|phrase| after.contains(phrase)) {
+            continue;
+        }
+        // An offer to route a future run is not a report of where this one stands, and the two are
+        // told apart by the line the mention is written on: the `stop at` inside a menu of next
+        // steps names no stop, while a line that reports a state names one whatever else it holds.
+        let (line_start, line_end) = line_bounds(&lowered, position);
+        if offers_a_route(&lowered[line_start..line_end]) {
             continue;
         }
         let around = mention_window(&lowered, position, BEFORE_CHARS, AFTER_CHARS);
@@ -868,6 +955,85 @@ struct NamedRead {
     by: String,
 }
 
+/// The vocabulary that makes a stored record a **close**: the record saying the change's ticket is
+/// finished, and therefore that the ordered sequence has run out and no checkpoint is open.
+///
+/// A close cannot be recognised by its authoring role, and asking for a `project-manager` record was
+/// unsatisfiable: the role that owns the ticket holds no memory write tool **by design**, so no such
+/// record can exist and no ruling of this console may be read as though one were merely missing.
+/// `mcp/storage/allow-list.json` states that design in its own words and names its source -- its
+/// `denial_note_by_role` carries `"project-manager": "refused write_entry, update_entry and
+/// delete_entry: it owns ticket state rather than persistent project memory"`, and its `comment`
+/// field says the file is "Derived from docs/routing-and-tool-grant-map.json: every
+/// 'mcp__storage__<operation>' string under 'grants.<role>' becomes a grant here, and nothing else
+/// does". That map gives the role exactly `mcp__coursetools__task_tracker`,
+/// `mcp__storage__read_entry` and `mcp__storage__list_entries`, so the denial is policy rather than
+/// a gap, and widening the grant is not the fix -- a close is written by whichever memory-holding
+/// role finishes the run (in the recorded run, the `reviewer`), so the console reads the close out
+/// of the record's own content instead. **Do not "fix" this by granting the project-manager a write
+/// tool.**
+///
+/// The phrases are deliberately narrow, and only a record whose own title *states* one counts: a
+/// ruling's "Approved: release as written. Close the ticket and stop.", a hold's "Hold: do not close
+/// the ticket yet.", and a reviewer's own "Review record -- ... post-Checkpoint-2" all fail to match,
+/// because each merely mentions closing or records the review that precedes it.
+const CLOSE_PHRASES: [&str; 3] = ["close-out", "close out record", "closed ticket"];
+
+/// Whether a stored record's own title states that the change is closed.
+///
+/// Read off the one corpus this console has: the run's closing record is titled `Closing record --
+/// act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope, human-owned release decision, and
+/// carried standing findings`. The three shapes accepted are that one (`"closing record"` as the
+/// record's whole statement, at its start), a status clause (`"... is Done:"`/`"... is done."`,
+/// where the clause ends rather than continuing into prose), and the past-tense statement that a
+/// ticket was closed (`"... closed ... ticket"` within one clause). A bare mention of the word
+/// `close`, and the imperative `Close the ticket and stop.`, match none of them.
+fn states_a_close(title: &str) -> bool {
+    let lowered = title.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return false;
+    }
+    if lowered.starts_with("closing record")
+        || CLOSE_PHRASES.iter().any(|phrase| lowered.contains(phrase))
+    {
+        return true;
+    }
+    // "... is Done:" -- a status clause that ends there, not the word "done" in passing.
+    if let Some(at) = lowered.find(" is done") {
+        let rest = lowered[at + " is done".len()..].trim_start();
+        if rest.is_empty()
+            || rest.starts_with(':')
+            || rest.starts_with('.')
+            || rest.starts_with(',')
+            || rest.starts_with(';')
+            || rest.starts_with('—')
+            || rest.starts_with('-')
+        {
+            return true;
+        }
+    }
+    // "closed ... ticket": the past-tense statement that a ticket was closed, in either order and
+    // with the ticket's own name between the two words, but within one clause.
+    if let Some(at) = lowered.find("closed") {
+        let before = lowered[..at].chars().count();
+        let start = before.saturating_sub(60);
+        let window: String = lowered
+            .chars()
+            .skip(start)
+            .take(before - start + 120)
+            .collect();
+        if window.contains("ticket") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether one storage-journal record is the run's close, whoever wrote it.
+fn is_close(entry: &StoreEntry) -> bool {
+    states_a_close(&entry.title)
+}
+
 /// Read the checkpoint state out of the evidence the caller already collected.
 ///
 /// The order the evidence is asked in is how directly each read speaks for this run: the in-flight
@@ -1217,11 +1383,19 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
         ));
     }
     // The ordered sequence is planner -> CHECKPOINT 1 -> implementer and reviewer -> CHECKPOINT 2
-    // -> project-manager closes. So a journal whose newest record is the planner's plan, with
-    // nothing after it and nothing newer than the freshness bound, is the journal's own shape for a
-    // run stopped at checkpoint 1. This is an inference from the journal and the card says so.
+    // -> the ticket closes. So a journal whose newest record is the planner's plan, with nothing
+    // after it and nothing newer than the freshness bound, is the journal's own shape for a run
+    // stopped at checkpoint 1. This is an inference from the journal and the card says so.
+    //
+    // And a close ends the run for the same reason a checkpoint is named at all: the newest record
+    // says the change is finished, so nothing in the ordered sequence is still open. The close is
+    // recognised by the record's own content and not by its author, because the role that owns the
+    // ticket holds no storage write tool by design (`mcp/storage/allow-list.json`,
+    // `denial_note_by_role.project-manager`; see `CLOSE_PHRASES` above) -- asking for a
+    // `project-manager` record was looking for a record that can never be written.
+    let last_is_close = stores.last().is_some_and(is_close);
     let mut journal_open: Option<(String, String)> = None;
-    if fresh {
+    if !last_is_close && fresh {
         match last_role.as_deref() {
             Some("planner")
                 if last_implementer.is_none_or(|index| index < last_planner.unwrap_or(0)) =>
@@ -1232,21 +1406,25 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
                 ));
             }
             Some("reviewer") => {
-                let closes = stores
-                    .iter()
-                    .rposition(|entry| entry.role == "project-manager");
-                let reviewer = stores.iter().rposition(|entry| entry.role == "reviewer");
-                if closes.is_none_or(|index| Some(index) < reviewer) {
-                    journal_open = Some((
-                        checkpoint_name(2),
-                        "the newest storage record is the reviewer's verdict and no project-manager close follows it".to_string(),
-                    ));
-                }
+                // The newest record here is a reviewer's own record and is not a close, so the
+                // verdict it carries stands: no close follows it, in the content of any record.
+                journal_open = Some((
+                    checkpoint_name(2),
+                    "the newest storage record is the reviewer's verdict and no close follows it"
+                        .to_string(),
+                ));
             }
             _ => {}
         }
     }
-    if let Some((name, why)) = &journal_open {
+    if let Some(entry) = stores.last().filter(|_| last_is_close) {
+        journal.push(format!(
+            "journal shape: the newest storage record is a close written by {} (\"{}\"), and a close \
+             ends the run whoever wrote it -- the role that owns the ticket holds no memory write \
+             tool by design, so the close is recognised by its content and no checkpoint is open",
+            entry.role, entry.title
+        ));
+    } else if let Some((name, why)) = &journal_open {
         let from = format!(
             "journal shape: {why}, and that record is inside the {} the config allows, so {name} \
              appears to be open (inferred from the journal, not from a run's prompt)",
@@ -1545,6 +1723,107 @@ mod tests {
         );
         let unmoved = format!("{}then Checkpoint 1", "é".repeat(BEFORE_CHARS + 30));
         assert_eq!(mentioned(&unmoved), None);
+    }
+
+    /// One storage-journal record, as the collector hands it to the card: the role that wrote it,
+    /// and the stored record's own title where the console could read one.
+    fn store(role: &str, title: &str) -> StoreEntry {
+        StoreEntry {
+            timestamp: "2026-09-30T17:28:16.869579+00:00".to_string(),
+            at: None,
+            role: role.to_string(),
+            operation: "write_entry".to_string(),
+            entry_id: "3794f97e-976e-4d0b-8507-de28a56f2ab0".to_string(),
+            classification: "internal".to_string(),
+            allowed: true,
+            reason: String::new(),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_close_is_read_from_the_records_content_and_not_from_its_authoring_role() {
+        // The run this console was pointed at closed under a `reviewer` record, because the role
+        // that owns the ticket holds no memory write tool by design
+        // (`mcp/storage/allow-list.json`, `denial_note_by_role.project-manager`). The content is
+        // the only thing that says so.
+        assert!(is_close(&store(
+            "reviewer",
+            "Closing record — act2-v2-run1 (KOMUN-act2-v2-run1) is Done: delivered scope, \
+             human-owned release decision, and carried standing findings"
+        )));
+        assert!(is_close(&store(
+            "project-manager",
+            "KOMUN-act2-v2-run1 closed — the ticket is Done"
+        )));
+        assert!(is_close(&store(
+            "implementer",
+            "Close-out: the change is merged"
+        )));
+        assert!(is_close(&store("planner", "Ticket KOMUN-1234 closed")));
+    }
+
+    #[test]
+    fn a_record_that_only_mentions_closing_names_no_close() {
+        // The three the card must not mistake for a close: the verdict that precedes the close, the
+        // ruling that instructs a close, and the hold that forbids one.
+        assert!(!is_close(&store(
+            "reviewer",
+            "Review record — act2-v2-run1 post-Checkpoint-2: accepted seven-criterion table, two \
+             known-cause exclusions, standing findings"
+        )));
+        assert!(!states_a_close(
+            "Approved: release as written. Close the ticket and stop."
+        ));
+        assert!(!states_a_close(
+            "Hold: do not close the ticket yet. Report what remains open and stop."
+        ));
+        // And the word itself, in an unrelated record, is not a close.
+        assert!(!states_a_close(
+            "Finding: the closure of RUN-2026-09-27-01 lacks a gate record"
+        ));
+        assert!(!states_a_close(""));
+    }
+
+    #[test]
+    fn the_runs_standing_menu_offers_a_route_and_names_no_stop() {
+        // Verbatim from the summary whose line settled this card on Checkpoint 1 while the run was
+        // closed: an offer of a future run, whose `stop at` is a route and not a state.
+        assert_eq!(
+            mentioned(
+                "- `plan: <one sentence>` — a new change request; I route it to `project-manager` \
+                 then `planner`, and stop at Checkpoint 1 for your approval."
+            ),
+            None
+        );
+        assert_eq!(
+            mentioned(
+                "- I would route it to `project-manager`, then `planner`, and the new run would \
+                 stop at Checkpoint 1 for your approval."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stop_the_run_reports_in_its_own_voice_still_counts() {
+        // The past tense is a state, and a state line counts however else it is written.
+        assert_eq!(
+            mentioned(
+                "- **Halt: not taken at step 5.** I carried it to checkpoint 2 with the missing \
+                 input named."
+            )
+            .as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+        assert_eq!(
+            mentioned(
+                "- `fmt` is STILL FAILING: Human Checkpoint 2 (release approval) -- WAITING, this \
+                 is where the run is stopped."
+            )
+            .as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
     }
 
     /// A human turn, as the CLI writes one.
