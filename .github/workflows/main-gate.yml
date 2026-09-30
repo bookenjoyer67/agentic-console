@@ -1,0 +1,50 @@
+# A push to main is checked here.
+#
+# The pipeline's own workflow runs on pull requests, because its change classifier reads the pull request's
+# base sha and has nothing to read on a push. This workflow carries the parts that need no base: the
+# repository's deterministic gates and its prose gate. It exists so a commit that lands on main is not the
+# first thing anyone has ever checked.
+#
+# What the conformance step proves here: the gate runs and the twelve governed files still parse and resolve
+# their citations. It is not a drift verdict — the gate compares the working tree against HEAD and fails only
+# on new drift, so on a fresh checkout `current` equals `base` and there is nothing to increase. Drift is
+# caught on the pull request, where there is a base to compare against.
+
+name: Main Gate
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    name: Deterministic Gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache the cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # The gates below run `--offline`. A cold runner cache has fetched nothing, and the failure is a
+      # findable one: "no matching package named `serde` found", exit 101. This step warms the cache.
+      - name: Fetch the crate cache the offline gates read
+        run: cargo fetch
+
+      - name: Run the deterministic gates
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets --offline -- -D warnings
+          cargo test --release --offline
+
+      - name: Run the conformance gate
+        run: python3 scripts/run-conformance-gate.py
