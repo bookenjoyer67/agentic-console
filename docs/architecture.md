@@ -96,7 +96,7 @@ for the rules that decide when a ruling is offered at all.
 
 ## Tests
 
-49 tests: 41 frame tests and 8 refresh tests.
+52 tests: 41 frame tests, 8 refresh tests, and 3 unit tests of the row-clipping rule.
 
     cargo test --release --offline
 

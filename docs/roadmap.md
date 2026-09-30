@@ -66,5 +66,5 @@ The console's own gate is three commands, and the same three run in CI:
     cargo clippy --release --all-targets -- -D warnings
     cargo test --release --offline
 
-The 49 tests are the floor, not the target: a change that alters a rendering adds a test at the width it
+The 52 tests are the floor, not the target: a change that alters a rendering adds a test at the width it
 altered, which is exactly the discipline the narrow-width defects were missing.

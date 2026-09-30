@@ -158,9 +158,11 @@ fn draw_checks(frame: &mut Frame, area: Rect, app: &App) {
         style::dim(),
     )));
     for check in &app.snapshot.live.checks {
-        // One line per check: three of them must fit even in a short pane, and the full text with
-        // its source is in `--dump`.
-        lines.push(Line::from(vec![
+        // One line per check, and clipped to the panel so it stays one line: three of them must fit
+        // even in a short pane, and the full text with its source is in `--dump`. Letting the row
+        // wrap instead is how a check disappears on a machine with longer paths -- the wrapped row
+        // falls past the panel's height and the panel reads as though the check does not exist.
+        let row = vec![
             Span::styled(
                 format!("{} ", check.light.glyph()),
                 style::light_style(check.light),
@@ -171,7 +173,11 @@ fn draw_checks(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!("{} ", check.last), Style::default()),
             Span::styled(format!("[{} {}]", check.source, check.age), style::dim()),
-        ]));
+        ];
+        lines.push(Line::from(style::clip_row(
+            row,
+            area.width.saturating_sub(2) as usize,
+        )));
     }
     frame.render_widget(
         Paragraph::new(Text::from(lines))
