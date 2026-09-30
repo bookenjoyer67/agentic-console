@@ -100,7 +100,7 @@ Each document opens with a `---` block carrying `classification`, `project`, and
 ```yaml
 ---
 classification: internal
-project: proj-komun
+project: proj-console
 doc_type: decision
 ---
 ```
@@ -412,7 +412,7 @@ because a degenerate corpus can score a matching chunk at zero.
 Order by descending BM25 score, then overlap, then chunk id (`mcp/retrieval/server.py:707`
 `ranked.sort(reverse=True)`).
 
-Tokenize on lowercase word characters and keep underscores, so `E_KOMUN_417` survives
+Tokenize on lowercase word characters and keep underscores, so `E_CONSOLE_417` survives
 (`mcp/retrieval/server.py:532` `def tokenize(text: str) -> list[str]:`).
 
 ## How does the classification ceiling work?
@@ -518,21 +518,18 @@ Which exit codes does the harness use?
 A live run over six queries reported `pass rate: 5/6 (83.3%) against the 80% floor` and exited
 `0`; the same set against `--floor 1.0` exited `1`, and a missing file exited `2`.
 
-What does the harness score on the committed corpus, and what changes the score?
+What did the reference project's committed corpus score, and what changes the score?
 
-Under the default `all-MiniLM-L6-v2` the committed `proj-komun` corpus scores `5/8`, which is `62.5%`
+Under the default `all-MiniLM-L6-v2` the reference project's committed `proj-komun` corpus scores `5/8`, which is `62.5%`
 and below the floor (`HARNESS_RESULT passed=5 total=8 rate=62.5 floor=80.0`).
 
 Three queries miss, and each miss is measured rather than assumed.
 
-- Query 1 asks how Komun applies a SQLx migration at server startup
-  (`docs/retrieval-ground-truth.md:34` `How does Komun apply a SQLx migration at server startup?`);
+- Query 1 of the reference project's key asks how Komun applies a SQLx migration at server startup;
   its best chunk scores `0.552`, and the best rival chunk scores `0.556`.
-- Query 7 asks how a reported count is verified
-  (`docs/retrieval-ground-truth.md:76` `How is a reported test count or denominator verified before it is reported?`);
+- Query 7 of that key asks how a reported count is verified;
   its best chunk scores `0.648`, two thousandths under the threshold.
-- Query 8 asks which rules govern code under `crates/wasm`
-  (`docs/retrieval-ground-truth.md:86` `no returned document is classified above public`);
+- Query 8 of that key asks which rules govern code under `crates/wasm`;
   the keyed document scores `0.409`, while `standard-coding-rules.md` scores `0.71`.
 
 In each miss the keyword fallback returned the keyed document, so the failure lies in the score and

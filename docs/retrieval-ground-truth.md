@@ -1,4 +1,4 @@
-# Retrieval ground truth — Komun reference corpus
+# Retrieval ground truth — the agentic-console reference corpus
 
 ## What is measured here, and what is frozen for the run?
 
@@ -6,84 +6,75 @@ This is the answer key for the retrieval server, one entry per query, and each e
 
 ## Which corpus is under test?
 
-Every corpus file is listed with its classification, doc type and size, so an edit after the lock is visible (`.memory/reference/*.md` -> `16 files, 30,581 bytes total`).
+Every corpus file is listed with its classification, doc type and size, so an edit after the lock is visible (`.memory/reference/*.md` -> `7 files, 14,764 bytes total`).
 
 | Document | Classification | Doc type | Bytes |
 |---|---|---|---|
-| `decision-migrations-append-only.md` | internal | decision | 1814 |
-| `decision-memory-plain-files.md` | internal | decision | 1991 |
-| `decision-auth-opaque-sessions.md` | internal | decision | 1878 |
-| `standard-doc-claims.md` | internal | standard | 1962 |
-| `standard-coding-rules.md` | internal | standard | 1983 |
-| `standard-claim-reproduction.md` | internal | standard | 1788 |
-| `runbook-quality-gate.md` | internal | runbook | 1902 |
-| `runbook-release-checklist.md` | internal | runbook | 1945 |
-| `runbook-sandbox-network.md` | internal | runbook | 1899 |
-| `runbook-deploy-topology.md` | public | runbook | 1950 |
-| `reference-wasm-crypto-boundary.md` | public | reference | 1910 |
-| `reference-migrations-002-003.md` | internal | reference | 1977 |
-| `reference-iteration-log.md` | internal | reference | 1954 |
-| `reference-retrieval-contract.md` | internal | reference | 1987 |
-| `reference-category-taxonomy.md` | internal | reference | 1731 |
-| `finance-hosting-costs.md` | confidential | reference | 1910 |
+| `reference-fork-provenance.md` | internal | reference | 2123 |
+| `reference-console-screens.md` | public | reference | 2242 |
+| `reference-config-seams.md` | internal | reference | 2211 |
+| `reference-gate-vocabulary.md` | internal | reference | 2144 |
+| `runbook-orchestration-checkpoints.md` | internal | runbook | 2061 |
+| `decision-sandbox-credentials.md` | confidential | decision | 1885 |
+| `standard-claim-reproduction.md` | internal | standard | 2098 |
 
-All 16 documents carry `project: proj-komun`. There is no secret-classified document in the corpus, and the count of confidential documents is exactly one.
+All seven documents carry `project: proj-console`. There is no secret-classified document in the corpus, and the count of confidential documents is exactly one.
 
 ## Query 1 — plain precision
 
-- **The query text:** `How does Komun apply a SQLx migration at server startup?`
-- **The expected top result:** `decision-migrations-append-only.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
-- **The pass criteria:** `decision-migrations-append-only.md` appears in the top 3 with `similarity_score >= 0.65` and `retrieval_method: "vector"`, and the result cites `source_document` and `chunk_index`.
+- **The query text:** `What instrument decides whether this repository's fork is real, and what does it prove?`
+- **The expected top result:** `reference-fork-provenance.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The pass criteria:** `reference-fork-provenance.md` appears in the top 3 with `similarity_score >= 0.65` and `retrieval_method: "vector"`, and the result cites `source_document` and `chunk_index`.
 
 ## Query 2 — near-miss, same document phrased differently
 
-- **The query text:** `Why can a shipped migration file in this repository never be edited?`
-- **The expected top result:** `decision-migrations-append-only.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
-- **The pass criteria:** `decision-migrations-append-only.md` appears in the top 3 with `similarity_score >= 0.65`. The score need not equal Query 1's, and no paraphrase may be added to the corpus to lift it.
+- **The query text:** `Why can a seam value left equal to the reference project's default make the port check fail?`
+- **The expected top result:** `reference-fork-provenance.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The pass criteria:** `reference-fork-provenance.md` appears in the top 3 with `similarity_score >= 0.65`. The score need not equal Query 1's, and no paraphrase may be added to the corpus to lift it.
 
 ## Query 3 — literal keyword with a keyword-fallback expectation
 
-- **The query text:** `002_directory_open_registration open_registration flag meaning`
-- **The expected top result:** `reference-migrations-002-003.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
-- **The pass criteria:** the document is found by the keyword fallback, with `retrieval_method: "keyword"` and `similarity_score: null`. The literal token `002_directory_open_registration` appears in exactly one corpus document, so a vector-only hit on this query does not pass.
+- **The query text:** `gate_allowlist probe cadence meaning`
+- **The expected top result:** `reference-gate-vocabulary.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The pass criteria:** the document is found by the keyword fallback, with `retrieval_method: "keyword"` and `similarity_score: null`. The literal token `gate_allowlist` appears in exactly one corpus document, so a vector-only hit on this query does not pass.
 
 ## Query 4 — ceiling query, where absence is the pass criterion
 
-- **The query text:** `What does hosting Komun cost per month, and what does the vendor contract commit us to?`
-- **The expected top result:** none above the ceiling — `finance-hosting-costs.md` must be absent from the entire response at any rank.
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
-- **The pass criteria:** `finance-hosting-costs.md` does not appear in the results. Absence is the pass condition, not a hit, and a confident return of that document fails the query however high its score. Repeat the identical query at `classification_ceiling: "public"` and require the same absence.
+- **The query text:** `Where does the sandbox stage the broker's credentials, and what token does the agent container hold?`
+- **The expected top result:** none above the ceiling — `decision-sandbox-credentials.md` must be absent from the entire response at any rank.
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The pass criteria:** `decision-sandbox-credentials.md` does not appear in the results. Absence is the pass condition, not a hit, and a confident return of that document fails the query however high its score.
 
 ## Query 5 — metadata filter
 
-- **The query text:** `Which decision records why agent memory is stored as plain files?`
-- **The expected top result:** `decision-memory-plain-files.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`, `metadata_filters: {"doc_type": "decision"}`
-- **The pass criteria:** `decision-memory-plain-files.md` appears in the top 3 with `similarity_score >= 0.65`, and every returned `source_document` carries `doc_type: "decision"`.
+- **The query text:** `Which document lists the gate vocabulary this repository's gate server can run?`
+- **The expected top result:** `reference-gate-vocabulary.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`, `metadata_filters: {"doc_type": "reference"}`
+- **The pass criteria:** `reference-gate-vocabulary.md` appears in the top 3 with `similarity_score >= 0.65`, and every returned `source_document` carries `doc_type: "reference"`.
 
 ## Query 6 — second plain precision query
 
-- **The query text:** `How are Komun sessions authenticated without a JWT?`
-- **The expected top result:** `decision-auth-opaque-sessions.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
-- **The pass criteria:** `decision-auth-opaque-sessions.md` appears in the top 3 with `similarity_score >= 0.65` and `retrieval_method: "vector"`.
+- **The query text:** `Where does a fork change a value so that every consumer of the seam table follows it?`
+- **The expected top result:** `reference-config-seams.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The pass criteria:** `reference-config-seams.md` appears in the top 3 with `similarity_score >= 0.65` and `retrieval_method: "vector"`.
 
 ## Query 7 — precision on a counted claim
 
-- **The query text:** `How is a reported test count or denominator verified before it is reported?`
+- **The query text:** `How is a reported test count or pass total verified before it is written down?`
 - **The expected top result:** `standard-claim-reproduction.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "internal"`, `top_k: 3`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "internal"`, `top_k: 3`
 - **The pass criteria:** `standard-claim-reproduction.md` appears in the top 3 with `similarity_score >= 0.65`.
 
 ## Query 8 — public ceiling, which must return only public documents
 
-- **The query text:** `What rules apply to changing code under crates/wasm?`
-- **The expected top result:** `reference-wasm-crypto-boundary.md`
-- **The expected metadata filters:** `project_id: "proj-komun"`, `classification_ceiling: "public"`, `top_k: 3`
-- **The pass criteria:** `reference-wasm-crypto-boundary.md` appears in the top 3 with `similarity_score >= 0.65`, and no returned document is classified above `public`.
+- **The query text:** `What are the console's three screens, and how does an operator switch between them?`
+- **The expected top result:** `reference-console-screens.md`
+- **The expected metadata filters:** `project_id: "proj-console"`, `classification_ceiling: "public"`, `top_k: 3`
+- **The pass criteria:** `reference-console-screens.md` appears in the top 3 with `similarity_score >= 0.65`, and no returned document is classified above `public`.
 
 ## Which retrieval behaviour does each query test?
 

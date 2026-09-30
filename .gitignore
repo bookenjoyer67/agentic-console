@@ -2,3 +2,13 @@
 
 # a user's own environment, if they copy the example
 .env
+
+# runtime state. The curated corpus under .memory/reference/ IS committed; the storage database is
+# run output and never is.
+.memory/storage.db
+.memory/storage.db-wal
+.memory/storage.db-shm
+
+# Python bytecode: the pipeline's modules are run from source, never from a cached compile.
+__pycache__/
+*.pyc
