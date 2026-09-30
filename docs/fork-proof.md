@@ -213,3 +213,24 @@ The rate depends on the embedding model, and that is worth stating plainly: the 
 `BAAI/bge-small-en-v1.5` with the retrieval query prefix, which is what the workflow sets. Against the
 server's own default model the same corpus scores 6 of 8, below the floor. The floor, the threshold and every
 query were left exactly as the reference project had them; nothing was lowered to reach a pass.
+
+## CI, running the whole pipeline
+
+The workflow runs on GitHub's runners, and its own artifacts are the evidence. Run `36748467830` on pull
+request 1: all five jobs green, four minutes end to end, every step executed rather than skipped.
+
+| job | what it did on the runner |
+|---|---|
+| Change Classifier | classified the changed files and published the change type |
+| Policy Test Suite | resolved the config, built the image pair, ran the policy suite inside the tools image: 90 of 90 |
+| Evaluation Harness | fetched the crates, ran the three cargo gates offline (3 of 3), the conformance gate, and the retrieval harness against this repository's corpus: 8 of 8, 100 percent, against the 80 percent floor, with `BAAI/bge-small-en-v1.5` |
+| Advisory Code Review | ran as advisory and non-gating. It reports `not_run` until a repository secret supplies `OPENROUTER_API_KEY`, which is what the reference workflow does too |
+| Audit Trail | consumed the six artifacts and wrote the trail for the pull request's merge sha |
+
+Six artifacts came back, and they are the receipt: `policy-report`, `deterministic-report` with its
+`conformance-report`, `retrieval-report` with its log and audit log, `advisory-review-report`,
+`change-classification` and `audit-trail`.
+
+The retrieval run is the one worth reading twice. The harness is this repository's own quality gate over its
+own corpus, and it passed on a hosted runner with no local state: the embedding model downloaded, the server
+indexed 7 documents, and 8 of 8 queries resolved above the floor.
