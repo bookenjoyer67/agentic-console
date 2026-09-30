@@ -28,16 +28,26 @@ SOCKET=agentic-console
 SESSION=ac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # the console crate: this directory
 BIN="$HERE/target/release/agentic-console"
-# The console ships inside the kit, so a fork that clones the kit builds this crate and runs
-# console/open.sh with no argument: HERE/.. is the kit, and it carries agentic.config.json.
-# A standalone clone has no kit above it -- HERE/.. is only wherever you cloned into -- so that
-# default is taken only when it actually looks like a kit repository, and otherwise the console
-# says what it is watching and how to name the repository instead.
-if [ -f "$HERE/../agentic.config.json" ]; then
+# Which repository does the console watch by default? The answer is the checkout this script lives
+# in, and the layout that decides how to find that checkout differs between the two shapes this
+# script ships in:
+#
+#   * the crate at the repository root -- what this fork is. HERE/agentic.config.json is the seam
+#     table, so HERE is the repository.
+#   * the crate in a console/ subdirectory of the kit -- the shape open.sh was first written for.
+#     HERE/agentic.config.json does not exist there; HERE/../agentic.config.json is the kit's.
+#
+# Both are tested, in that order, because testing only the second is what made this script watch
+# $PWD for anyone who ran a root-layout checkout from somewhere else -- silently watching the wrong
+# directory while README.md promised the crate's repository. A checkout with neither file is a
+# standalone clone, so the console says what it is watching and how to name the repository instead.
+if [ -f "$HERE/agentic.config.json" ]; then
+  REPO_DEFAULT="$HERE"
+elif [ -f "$HERE/../agentic.config.json" ]; then
   REPO_DEFAULT="$(cd "$HERE/.." && pwd)"
 else
   REPO_DEFAULT="$PWD"
-  echo "note: no agentic.config.json above this crate, so the console will watch $REPO_DEFAULT" >&2
+  echo "note: no agentic.config.json in this crate or above it, so the console will watch $REPO_DEFAULT" >&2
   echo "      name the repository instead: ./open.sh /path/to/repo" >&2
 fi
 T=(tmux -L "$SOCKET")

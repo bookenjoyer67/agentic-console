@@ -13,11 +13,23 @@ set -uo pipefail
 
 input="$(cat)"
 
-# Extract the first "file_path" value without depending on jq (the sandbox image has no jq or python3).
-path="$(printf '%s' "$input" \
-  | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' \
-  | head -1 \
-  | sed 's/^"file_path"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+# Extract the target path without depending on jq (the sandbox image has no jq or python3). Both
+# parameter names are read, because the two tool families disagree on it: the harness's
+# Write/Edit/MultiEdit tools pass `file_path`, and `mcp__coursetools__file_write` passes `path`. A
+# guard that reads only one name is a guard the other family walks past on a name difference alone.
+# Pure parameter expansion, so no quote nesting and no external tool beyond grep.
+path=""
+for key in file_path path; do
+  raw="$(printf '%s' "$input" \
+    | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+    | head -1)"
+  [ -n "$raw" ] || continue
+  path="${raw#*:}"                                   # from the colon onward
+  path="${path#"${path%%[![:space:]]*}"}"            # drop leading whitespace
+  path="${path#\"}"                                  # drop the opening quote
+  path="${path%\"}"                                  # drop the closing quote
+  break
+done
 
 case "$path" in
   */.memory/knowledge/* | */.memory/reference/*)
