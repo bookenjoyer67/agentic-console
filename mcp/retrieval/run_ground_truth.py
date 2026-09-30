@@ -28,7 +28,7 @@ THRESHOLD = 0.65
 DEFAULT_TOP_K = 3
 PASS_FLOOR = 0.80
 DEFAULT_SERVER = "http://localhost:8002/mcp"
-DEFAULT_PROJECT = "proj-komun"
+DEFAULT_PROJECT = "proj-console"
 DEFAULT_CEILING = "internal"
 # The retrieval server authorizes every call against mcp/retrieval/allow-list.json, so the harness
 # names the role it calls as. The Implementer holds `retrieve` at ceiling `internal`
@@ -107,7 +107,7 @@ def first_filename(text: str) -> str | None:
 def parse_filters(value: str) -> dict[str, str]:
     """Pull project, ceiling and doc_type out of a filters line in any of its written forms.
 
-    Accept ``project_id: "proj-komun"``, ``doc_type = decision`` and a JSON
+    Accept ``project_id: "proj-console"``, ``doc_type = decision`` and a JSON
     ``metadata_filters: {"doc_type": "decision"}`` block, in the same line or in different ones.
     """
     filters: dict[str, str] = {}

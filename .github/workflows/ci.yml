@@ -13,26 +13,37 @@
 # policy-gate carries no `continue-on-error` on purpose: leaving it at its default of false is what
 # makes a failing job actually fail, and a policy gate is never advisory or demotable.
 #
-# What this repository changed when the pipeline was ported here, and why. The pipeline this was
-# ported from ran every check inside a docker sandbox image pair built from the repository under
-# test. That repository shipped the root Dockerfile that pair's base image is built from; this one
-# does not (`sandbox/Dockerfile.m3` builds FROM a base image that has no Dockerfile here, so no image
-# can be built on a fresh runner). The checks were therefore re-pointed at the commands this
-# repository actually runs:
+# What this repository runs, and why it can run it here. The pipeline this was ported from ran every
+# check inside a docker sandbox image pair built from the repository under test. This repository
+# carries the same runtime — the root `Dockerfile` builds the base image, and `sandbox/Dockerfile.m3`
+# builds the tools image FROM it — so the pair is built here and the checks that need the runtime run
+# inside it:
 #
-#   * the cargo gates are this repository's own three, run directly on the runner at the repository
-#     root: `cargo fmt --check`, `cargo clippy --release --all-targets --offline -- -D warnings` and
-#     `cargo test --release --offline`. `--offline` is what the sandbox toolchain needs, because the
-#     sandbox container reaches no crate registry.
+#   * the sandbox image pair, built from this repository: `docker build -t <base> .` first, then
+#     `docker build -f sandbox/Dockerfile.m3 -t <tools> .`, because sandbox/Dockerfile.m3 defaults
+#     `ARG BASE` to the base image and cannot be built without it. Both tags are read from
+#     agentic.config.json (`containers.base_image`, `containers.tools_image`) rather than retyped.
 #   * the policy suites are this repository's copies (`eval/test_policy.py` and
-#     `eval/test_deterministic_step.py`) run against the sandbox's own pinned Python toolchain
-#     (`sandbox/requirements-m3.txt`), which also pins the `pytest-json-report` plugin the report
-#     flag needs.
+#     `eval/test_deterministic_step.py`), run INSIDE the tools image with the checkout mounted
+#     read-only and only the artifact directory writable. The image carries the pinned Python
+#     toolchain (`sandbox/requirements-m3.txt`), which also pins the `pytest-json-report` plugin the
+#     report flag needs; the runner installs nothing.
+#   * the cargo gates are this repository's own three, run at the repository root on the runner:
+#     `cargo fmt --check`, `cargo clippy --release --all-targets --offline -- -D warnings` and
+#     `cargo test --release --offline`. `--offline` is the discipline this repository keeps: the
+#     sandbox container reaches no crate registry, so the toolchain is exercised offline. A cold
+#     runner cache has fetched nothing, and `--offline` against an empty CARGO_HOME fails with
+#     "no matching package named `serde` found", so a `cargo fetch` step runs first to warm the
+#     local cache the offline gates read.
+#   * the retrieval ground-truth harness is `mcp/retrieval/run_ground_truth.py`, run inside the tools
+#     image against the retrieval server started from the same checkout. The corpus is the seven
+#     documents under `.memory/reference/`; the harness's own exit status is the gate, and it exits
+#     non-zero below the 80 percent floor.
 #   * the conformance gate is this repository's converted prose-and-citation step
 #     (`python3 scripts/run-conformance-gate.py`), run against HEAD and failing on new drift only.
 #
 # Every `run:` block in this file was executed against this repository's tree, and the result is
-# recorded in the port report.
+# recorded in docs/fork-proof.md.
 
 name: CI
 
@@ -107,8 +118,9 @@ jobs:
 
   # ---------------------------------------------------------------------------------------------
   # Row 2: "Policy Test Suite | Whether permissions match the governance policy | No | Every run |
-  # Yes | Policy report". Gating, and it runs on every pull request. It runs this repository's two
-  # Python suites and uploads the JSON report with if: always().
+  # Yes | Policy report". Gating, and it runs on every pull request. It builds the sandbox image
+  # pair, runs this repository's two Python suites inside the tools image with the workspace
+  # read-only, and uploads the JSON report with if: always().
   # ---------------------------------------------------------------------------------------------
   policy-gate:
     name: Policy Test Suite
@@ -118,24 +130,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          # The Python the sandbox image carries, so the pinned toolchain below is the sandbox's.
-          python-version: "3.12"
-
-      # The dependencies are the sandbox's own pinned list, installed rather than baked into an
-      # image, because no image can be built from this repository on a fresh runner. The same file
-      # pins `pytest-json-report`, which is what makes the report flag below runnable at all.
-      - name: Install the Python toolchain
+      # Every repository-specific value this job needs is read from agentic.config.json through
+      # scripts/agentic_config.py, each with this repository's current value as the fallback
+      # default, so the job is unchanged when the loader or the config is absent. The fork checklist
+      # for the seams this reads is docs/fork-proof.md.
+      - name: Resolve the portability config
         run: |
-          python3 -m pip install --disable-pip-version-check -r sandbox/requirements-m3.txt
+          cfg() { local v; v="$(python3 scripts/agentic_config.py --get "$1" --default "$2" 2>/dev/null)" || v="$2"; [ -n "$v" ] || v="$2"; printf '%s' "$v"; }
+          {
+            echo "AGENT_IMAGE_BASE=$(cfg containers.base_image 'agent-sandbox:console')"
+            echo "AGENT_IMAGE_TOOLS=$(cfg containers.tools_image 'agent-sandbox:console-m1')"
+            echo "AGENT_WORKSPACE=$(cfg containers.workspace '/workspace')"
+          } >> "$GITHUB_ENV"
 
+      # Adaptation of the lesson's `docker build -t agentic_engineer_4 .` (block [93]). This
+      # repository's equivalent of the course image is the two-image sandbox pair, and the second
+      # build needs the first as its base (sandbox/Dockerfile.m3 `ARG BASE=agent-sandbox:console`),
+      # so the order here is load-bearing.
+      - name: Build the sandbox image
+        run: |
+          docker build -t ${{ env.AGENT_IMAGE_BASE }} .
+          docker build -f sandbox/Dockerfile.m3 -t ${{ env.AGENT_IMAGE_TOOLS }} .
+
+      # The suites run inside the tools image, which carries the pinned Python toolchain from
+      # sandbox/requirements-m3.txt (including pytest-json-report, which the report flag needs). The
+      # checkout is mounted read-only; only the artifact directory is writable.
       - name: Run policy tests
         run: |
           mkdir -p ci-artifacts
-          python3 -m pytest eval/test_policy.py eval/test_deterministic_step.py -v \
-            --json-report \
-            --json-report-file=ci-artifacts/policy-report.json
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":${{ env.AGENT_WORKSPACE }}:ro \
+            -v "$GITHUB_WORKSPACE/ci-artifacts":/reports \
+            -w ${{ env.AGENT_WORKSPACE }} \
+            ${{ env.AGENT_IMAGE_TOOLS }} \
+            python -m pytest eval/test_policy.py eval/test_deterministic_step.py -v \
+              --json-report \
+              --json-report-file=/reports/policy-report.json
 
       - name: Upload policy report
         if: always()
@@ -150,7 +180,8 @@ jobs:
   # Row 3: "Evaluation Harness | Whether agent behavior remains acceptable | Can run both
   # deterministic and agentic tests | Agent-affecting changes | Yes | Evaluation reports".
   # Gating, and it runs only when the classifier says the change can affect agent behaviour. The
-  # deterministic checks are this repository's three cargo gates plus its conformance gate.
+  # deterministic checks are this repository's three cargo gates plus its conformance gate; the
+  # retrieval harness runs the same check the runtime serves retrieval from.
   # ---------------------------------------------------------------------------------------------
   eval-gate:
     name: Evaluation Harness
@@ -161,11 +192,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Every repository-specific value this job needs is read from agentic.config.json through
+      # scripts/agentic_config.py, each with this repository's current value as the fallback
+      # default, so the job is unchanged when the loader or the config is absent. The fork checklist
+      # for the seams this reads is docs/fork-proof.md.
+      - name: Resolve the portability config
+        run: |
+          cfg() { local v; v="$(python3 scripts/agentic_config.py --get "$1" --default "$2" 2>/dev/null)" || v="$2"; [ -n "$v" ] || v="$2"; printf '%s' "$v"; }
+          {
+            echo "AGENT_IMAGE_BASE=$(cfg containers.base_image 'agent-sandbox:console')"
+            echo "AGENT_IMAGE_TOOLS=$(cfg containers.tools_image 'agent-sandbox:console-m1')"
+            echo "AGENT_WORKSPACE=$(cfg containers.workspace '/workspace')"
+          } >> "$GITHUB_ENV"
+
+      # The same pair policy-gate builds, because each job starts on a fresh runner. The base image
+      # is built first: sandbox/Dockerfile.m3 builds FROM it.
+      - name: Build the sandbox image
+        run: |
+          docker build -t ${{ env.AGENT_IMAGE_BASE }} .
+          docker build -f sandbox/Dockerfile.m3 -t ${{ env.AGENT_IMAGE_TOOLS }} .
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # CORRECTNESS: the three gates below pass `--offline`, and `--offline` resolves nothing against
+      # a cold cache. On a fresh runner (a cache miss on the restored cache, or the very first run)
+      # the crate registry is empty, and `cargo test --release --offline` fails before compiling
+      # anything with "error: no matching package named `serde` found / location searched: crates.io
+      # index". This step fetches the lock file's crates into CARGO_HOME while the network is
+      # available, which is what the offline gates then read. It is not a relaxation of the gate:
+      # the gates still run offline.
+      - name: Fetch the crate cache the offline gates read
+        run: cargo fetch
 
       - name: Run the deterministic gates
         run: |
@@ -238,6 +299,77 @@ jobs:
           set -o pipefail
           python3 scripts/run-conformance-gate.py | tee ci-artifacts/conformance-report.json
 
+      # The harness is the gate; the server is the fixture it is pointed at. The server indexes the
+      # corpus from the checkout, prints `indexed N chunks from M documents`, and only then can the
+      # harness be run against it. always(): a red deterministic gate above must not hide the
+      # harness evidence.
+      - name: Run the retrieval ground-truth harness
+        if: always()
+        run: |
+          mkdir -p ci-artifacts
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":${{ env.AGENT_WORKSPACE }}:ro \
+            -v "$GITHUB_WORKSPACE/ci-artifacts":/reports \
+            -e RETRIEVAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5 \
+            -e RETRIEVAL_QUERY_PREFIX='Represent this sentence for searching relevant passages: ' \
+            -e RETRIEVAL_AUDIT_PATH=/reports/retrieval-audit.log \
+            -w ${{ env.AGENT_WORKSPACE }} \
+            ${{ env.AGENT_IMAGE_TOOLS }} \
+            bash -c '
+              python3 mcp/retrieval/server.py --port 8002 --host 127.0.0.1 \
+                --audit-path /reports/retrieval-audit.log > /reports/retrieval-server.log 2>&1 &
+              server_pid=$!
+              for attempt in $(seq 1 150); do
+                grep -q "^indexed " /reports/retrieval-server.log 2>/dev/null && break
+                kill -0 "$server_pid" 2>/dev/null || break
+                sleep 1
+              done
+              grep -m1 "^indexed " /reports/retrieval-server.log
+              status=0
+              python3 mcp/retrieval/run_ground_truth.py --server http://127.0.0.1:8002/mcp \
+                > /reports/retrieval-ground-truth.log 2>&1 || status=$?
+              kill "$server_pid" 2>/dev/null || true
+              cat /reports/retrieval-ground-truth.log
+              exit "$status"
+            '
+
+      - name: Write the retrieval report the audit trail consumes
+        # Advisory support step: it turns the harness log into JSON evidence. The 80 percent floor
+        # is enforced by the harness above, whose exit status is the gate. A missing or unparsable
+        # log produces a report rather than a failure, because the failure is already recorded by
+        # the step whose exit status is the gate.
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+
+          log = pathlib.Path("ci-artifacts/retrieval-ground-truth.log")
+          text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+          match = re.search(
+              r"^HARNESS_RESULT passed=(\d+) total=(\d+) rate=([\d.]+) floor=([\d.]+)", text, re.M
+          )
+          if match:
+              passed, total, rate, floor = (
+                  int(match.group(1)), int(match.group(2)), float(match.group(3)), float(match.group(4))
+              )
+          else:
+              passed, total, rate, floor = 0, 0, 0.0, 80.0
+          report = {
+              "summary": {"passed": passed, "failed": total - passed, "total": total},
+              "pass_rate": rate,
+              "floor": floor,
+              "retrieval_method_model": "BAAI/bge-small-en-v1.5",
+              "harness_result": match.group(0) if match else None,
+              "log": "retrieval-ground-truth.log",
+          }
+          pathlib.Path("ci-artifacts/retrieval-report.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(report["summary"]))
+          PY
+
       - name: Upload the deterministic gate reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -246,6 +378,19 @@ jobs:
           path: |
             ci-artifacts/deterministic-report.json
             ci-artifacts/conformance-report.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload the retrieval harness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-report
+          path: |
+            ci-artifacts/retrieval-report.json
+            ci-artifacts/retrieval-ground-truth.log
+            ci-artifacts/retrieval-audit.log
+            ci-artifacts/retrieval-server.log
           retention-days: 90
           if-no-files-found: ignore
 
