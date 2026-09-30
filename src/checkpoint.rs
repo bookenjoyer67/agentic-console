@@ -183,6 +183,67 @@ const NEGATIONS: [&str; 6] = [
     "not yet approved",
 ];
 
+/// The phrases that mark a mention as naming the checkpoint a run **stopped at**.
+///
+/// A negation alone cannot tell a stop from a mention in passing. Both places a run names a
+/// checkpoint also hold prose about work it has not begun: a closing summary that has finished
+/// still offers to route the next piece of work -- `then `project-manager`, then `planner`, then
+/// Checkpoint 1. I cannot start it from this message` -- and nothing in that sentence is negated.
+/// When such a sentence is the newest mention, a negation-only rule reads the run's own words
+/// backwards and settles the card on a checkpoint the run never reached, while the same summary
+/// says in its own first paragraph which checkpoint closed the run.
+///
+/// So a mention names a stop only when the decision that stop is on stands beside it: a brief
+/// writes `STOP at HUMAN CHECKPOINT 1 (plan approval)`, a summary writes `Checkpoint 1 (plan
+/// approval): PENDING, this is where the run is stopped`, a ruling writes `Human Checkpoint 2
+/// ruling`, and a run's own words write `the run now stops at human checkpoint 2`, `Human
+/// checkpoint 2 — WAITING`, or `I carried it to checkpoint 2`. Prose about a run that has not
+/// started carries none of these and names no stop. Every phrase here is one a real run in this
+/// repository's own evidence directory wrote; the list is read off that corpus rather than guessed.
+const STOP_MARKERS: [&str; 11] = [
+    "stop at",
+    "stopped at",
+    "stops at",
+    "stopping at",
+    "halted at",
+    "carried it to",
+    "pending",
+    "waiting",
+    "this is where the run is stopped",
+    "ruling",
+    "awaiting",
+];
+
+/// How much text either side of a mention a marker may sit in, and how far a negation may trail
+/// it.
+///
+/// A stop marker can precede the mention (`stopped at Checkpoint 1`) or follow it (`Checkpoint 2
+/// ruling`), so the marker read reaches both ways. A negation only ever trails the mention it
+/// negates (`Checkpoint 2: not reached`), and reading backwards for one quotes the wrong thing:
+/// `Halt: not taken at step 5. I carried it to checkpoint 2` says a halt was skipped, not that the
+/// checkpoint was, so the negation read stays forward of the mention exactly as it was.
+const BEFORE_CHARS: usize = 90;
+const AFTER_CHARS: usize = 80;
+
+/// The text around one mention: `before` characters in front of it and `after` behind it.
+///
+/// `position` is a byte offset into the ASCII-lowercased text, so the cut in front is taken from
+/// `char_indices` and never by subtraction: a mention that follows a non-ASCII character would
+/// otherwise split one and panic on the slice.
+fn mention_window(lowered: &str, position: usize, before: usize, after: usize) -> String {
+    let start = match before {
+        0 => position,
+        count => lowered[..position]
+            .char_indices()
+            .rev()
+            .nth(count - 1)
+            .map(|(at, _)| at)
+            .unwrap_or(0),
+    };
+    let tail: String = lowered[position..].chars().take(after).collect();
+    format!("{}{}", &lowered[start..position], tail)
+}
+
 /// Every `checkpoint 1` / `checkpoint 2` mention in a lowered text, in the order it appears.
 fn checkpoint_mentions(lowered: &str) -> Vec<(usize, u8)> {
     let mut found: Vec<(usize, u8)> = Vec::new();
@@ -209,15 +270,22 @@ fn checkpoint_mentions(lowered: &str) -> Vec<(usize, u8)> {
 /// is on: a brief ends `... STOP at HUMAN CHECKPOINT 1 (plan approval)` and a closing summary ends
 /// `Checkpoint 1 (plan approval): PENDING, this is where the run is stopped`. A mention the words
 /// around it negate names no stop and is skipped, so the two mentions inside one summary do not
-/// cancel each other out and the not-reached one cannot win by being written last.
+/// cancel each other out and the not-reached one cannot win by being written last. A mention those
+/// words carry no stop marker beside either names no stop, which is what keeps a summary's offer to
+/// route the *next* piece of work -- `then `planner`, then Checkpoint 1` -- from being read as the
+/// checkpoint this run reached.
 fn named_mention(text: &str) -> Option<(String, usize)> {
     // ASCII lowercasing only: the needles are ASCII, and it leaves every byte offset in `text`
     // usable as a slice boundary, so the quote can be cut from the original characters.
     let lowered = text.to_ascii_lowercase();
     let mut newest: Option<(u8, usize)> = None;
     for (position, index) in checkpoint_mentions(&lowered) {
-        let window: String = lowered[position..].chars().take(80).collect();
-        if NEGATIONS.iter().any(|phrase| window.contains(phrase)) {
+        let after = mention_window(&lowered, position, 0, AFTER_CHARS);
+        if NEGATIONS.iter().any(|phrase| after.contains(phrase)) {
+            continue;
+        }
+        let around = mention_window(&lowered, position, BEFORE_CHARS, AFTER_CHARS);
+        if !STOP_MARKERS.iter().any(|phrase| around.contains(phrase)) {
             continue;
         }
         newest = Some((index, position));
@@ -1308,4 +1376,123 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
 /// Whether the resolved checkpoint is the card's own placeholder: nothing named one.
 fn evidence_carries_no_checkpoint(resolved: &str) -> bool {
     resolved == "no checkpoint named by any evidence"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sentence a finished run writes about work it has not started: a route for a *new* run,
+    /// taken verbatim from the summary whose tail settled this card on Checkpoint 1.
+    const HYPOTHETICAL: &str =
+        "If one of those is what you mean, name it and I will route it from \
+                                step 1 — `project-manager`, then `planner`, then Checkpoint 1. I \
+                                cannot start it from this message, and not only for scope reasons";
+
+    /// The roadmap row of the same summary: the next run's plan would stop at Checkpoint 1 too.
+    const ROADMAP_ROW: &str = "| A gate that rebuilds `crates/wasm/pkg/` | A new \
+                               `agentic.config.json` name, so a new plan and Checkpoint 1 |";
+
+    /// The same summary's first paragraph: it says which checkpoint closed the run, and the
+    /// hypothetical above is written later in the same message than this sentence.
+    const CLOSURE: &str = "The plan was executed to completion, all seven criteria settled, and \
+                           your Checkpoint 2 ruling closed the run with \"Then stop\".";
+
+    #[test]
+    fn a_mention_about_a_future_run_names_no_stop() {
+        assert_eq!(mentioned(HYPOTHETICAL), None);
+        assert_eq!(mentioned(ROADMAP_ROW), None);
+    }
+
+    #[test]
+    fn the_words_real_runs_wrote_about_stops_are_read() {
+        // Each of these is verbatim from a real log in the evidence directory, and the phrases in
+        // `STOP_MARKERS` were read off that corpus: a list built from guesswork missed all three.
+        assert_eq!(
+            mentioned("The run now stops at human checkpoint 2.").as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+        assert_eq!(
+            mentioned("**Human checkpoint 2 — WAITING (this is where the run has stopped)**")
+                .as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+        assert_eq!(
+            mentioned(
+                "- **Halt: not taken at step 5.** I carried it to checkpoint 2 with the \
+                       missing input named."
+            )
+            .as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+    }
+
+    #[test]
+    fn a_future_run_named_in_full_still_names_no_stop() {
+        // The rule must not lean on the `(plan approval)` parenthetical: a summary can write the
+        // canonical name in full and still be talking about work nobody has started.
+        assert_eq!(
+            mentioned("A new plan and HUMAN CHECKPOINT 1 (plan approval) would follow it."),
+            None
+        );
+    }
+
+    #[test]
+    fn a_closing_summary_names_the_checkpoint_that_closed_it() {
+        // Both in one message, closure first and the hypothetical later: the later mention used to
+        // win outright, which is how this card read Checkpoint 1 while the run was past it.
+        let whole = format!("{CLOSURE}\n\n{ROADMAP_ROW}\n\n{HYPOTHETICAL}");
+        assert_eq!(
+            mentioned(&whole).as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+    }
+
+    #[test]
+    fn the_stop_markers_are_read_where_a_run_writes_them() {
+        assert_eq!(
+            mentioned(
+                "Nothing starts before a human approves the plan: STOP at HUMAN CHECKPOINT 1 \
+                       (plan approval)."
+            )
+            .as_deref(),
+            Some("HUMAN CHECKPOINT 1 (plan approval)")
+        );
+        assert_eq!(
+            mentioned("Checkpoint 1 (plan approval): PENDING, this is where the run is stopped.")
+                .as_deref(),
+            Some("HUMAN CHECKPOINT 1 (plan approval)")
+        );
+        assert_eq!(
+            mentioned("Operator to orchestrator. Human Checkpoint 2 ruling for act 2 v2.")
+                .as_deref(),
+            Some("HUMAN CHECKPOINT 2 (release approval)")
+        );
+    }
+
+    #[test]
+    fn a_negated_mention_names_no_stop() {
+        assert_eq!(
+            mentioned("Checkpoint 2 (release approval): not reached."),
+            None
+        );
+        assert_eq!(
+            mentioned("Checkpoint 1 (plan approval) was never reached."),
+            None
+        );
+    }
+
+    #[test]
+    fn a_window_that_starts_inside_a_multibyte_run_does_not_panic() {
+        // The mention sits more than `BEFORE_CHARS` characters in, so the window's front edge is
+        // found by character and not by subtracting bytes: a two-byte `é` at that offset would
+        // otherwise split one and panic on the slice.
+        let text = format!("{}stop at Checkpoint 1", "é".repeat(BEFORE_CHARS + 30));
+        assert_eq!(
+            mentioned(&text).as_deref(),
+            Some("HUMAN CHECKPOINT 1 (plan approval)")
+        );
+        let unmoved = format!("{}then Checkpoint 1", "é".repeat(BEFORE_CHARS + 30));
+        assert_eq!(mentioned(&unmoved), None);
+    }
 }
