@@ -1,0 +1,37 @@
+# Module 3 Python toolchain for the Komun sandbox — Agentic Engineer, Module 3.
+#
+# Deliberately NOT the course image's dependency set. module_3/requirements.txt pulls
+# sentence-transformers + chromadb + torch, which is ~2.5 GB of image for one embedding model.
+# The approved decision (C2) is fastembed (ONNX runtime, no torch) + sqlite-vec.
+
+# --- MCP server framework (C1) ---
+# `mcp` is pinned below 2.0 on purpose. In mcp 2.x the bundled FastMCP was renamed to MCPServer
+# (`mcp.server.mcpserver`), so the lesson's own import line — `from mcp.server.fastmcp import FastMCP` —
+# dies at import time with "No module named 'mcp.server.fastmcp'". The course pins nothing, so a fresh
+# build of the course image breaks the same way. Verified in this image: mcp 2.x installed =>
+# CONNECTION_CLOSED when Claude Code starts the coursetools server.
+mcp>=1.9,<2
+fastmcp
+
+# --- Storage MCP server: async SQLite ---
+aiosqlite
+
+# --- Retrieval MCP server: local embeddings + vector search, no API key, no torch ---
+fastembed
+sqlite-vec
+numpy
+
+# --- Keyword fallback for the retrieval server ---
+rank-bm25
+
+# --- Shared with the lessons' snippets ---
+pydantic
+httpx
+rich
+typer
+
+# --- Harness code and its tests ---
+pytest
+# The policy-gate CI step uses pytest's --json-report flag, which this plugin provides.
+# Pinned here so the pipeline installs nothing at run time.
+pytest-json-report==1.5.0

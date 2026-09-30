@@ -1,0 +1,54 @@
+{
+  "enabledMcpjsonServers": [
+    "coursetools",
+    "storage",
+    "retrieval",
+    "gate"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/load-memory.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-readonly-memory.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "mcp__coursetools__codebase_search",
+      "mcp__coursetools__file_read",
+      "mcp__coursetools__file_write",
+      "mcp__coursetools__task_tracker",
+      "mcp__coursetools__test_runner",
+      "mcp__coursetools__web_search",
+      "mcp__gate__list_gates",
+      "mcp__gate__read_audit_log",
+      "mcp__gate__run_fix",
+      "mcp__gate__run_gate",
+      "mcp__retrieval__retrieve",
+      "mcp__storage__list_entries",
+      "mcp__storage__read_entry",
+      "mcp__storage__update_entry",
+      "mcp__storage__write_entry"
+    ],
+    "deny": [
+      "mcp__storage__delete_entry"
+    ]
+  }
+}

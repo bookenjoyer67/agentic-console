@@ -1,0 +1,44 @@
+{
+  "server": "retrieval",
+  "operations": [
+    "retrieve"
+  ],
+  "comment": [
+    "File-based allow-list for the retrieval MCP server: one entry per role, naming exactly the retrieval operations that role may call.",
+    "The server reads this file at startup and checks it as the first statement of retrieve. A role that is not listed as holding 'retrieve' is refused with an authorization_denied error naming the role, the operation and the roles that ARE allowed, and the refusal is journalled to the same audit log that records the successful calls.",
+    "A role that is absent from 'roles' is an unknown role and is refused, as is a missing or blank role; nothing is defaulted to an allowed role.",
+    "Derived from docs/routing-and-tool-grant-map.json: every 'mcp__retrieval__retrieve' string under 'grants.<role>' becomes a grant here, and nothing else does.",
+    "The classification ceiling is NOT duplicated in this file. The server reads the per-role ceiling from 'retrieval_ceiling' in docs/routing-and-tool-grant-map.json and takes the stricter of that ceiling and the caller's requested ceiling, so one file stays the source of truth for the ceiling.",
+    "Written as valid JSON with no comments: the explanation lives in these string fields."
+  ],
+  "source_of_truth": "docs/routing-and-tool-grant-map.json",
+  "ceiling_source_of_truth": "docs/routing-and-tool-grant-map.json#retrieval_ceiling",
+  "derivation": "grants[role] filtered to the operations this server exposes; a role granted 'retrieve' must also carry a retrieval_ceiling above 'none' in the routing map, and the server refuses to start if the two files disagree",
+  "denial_note_by_role": {
+    "orchestrator": "refused retrieve: it sequences roles and reads their returns, and queries no corpus",
+    "planner": "holds retrieve at ceiling internal: a plan is grounded in the project's own reference documents, and nothing above internal is storable in project memory",
+    "implementer": "holds retrieve at ceiling internal: the implementer grounds code changes in the reference corpus, bounded to internal",
+    "tester": "refused retrieve: it works from the supplied acceptance criteria and the gate output, and searches no corpus",
+    "reviewer": "holds retrieve at ceiling internal: a review cites the same reference documents the change cites, bounded to internal",
+    "project-manager": "refused retrieve: it owns the ticket tool and performs no reference lookup",
+    "researcher": "refused retrieve: its channel is the open web, and the internal corpus would only widen its context"
+  },
+  "denial_note_by_operation": {
+    "retrieve": "refused to the roles that read no corpus at all, so no reference document reaches a context that does not need one; the ceiling then bounds the four roles that do, and a role capped at internal can never obtain a confidential or secret document by asking for a higher ceiling"
+  },
+  "roles": {
+    "orchestrator": [],
+    "planner": [
+      "retrieve"
+    ],
+    "implementer": [
+      "retrieve"
+    ],
+    "tester": [],
+    "reviewer": [
+      "retrieve"
+    ],
+    "project-manager": [],
+    "researcher": []
+  }
+}

@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "_purpose": [
+    "The single seam table for this agentic quality gate. Every value here is a place where a fork",
+    "must depart from Komun. The consumers are: mcp/gate/server.py, scripts/run-agent.sh,",
+    "scripts/classify-change.py, scripts/validate_doc_conformance_deterministic.py and",
+    "eval/test_policy.py. Each consumer reads this file and exposes what it consumed through",
+    "`--print-config`, so scripts/port-self-test.sh can prove the wiring instead of trusting it.",
+    "Absent or unreadable, every consumer falls back to the values below, which are this repository's.",
+    "See PORTING.md for the fork checklist."
+  ],
+  "project": {
+    "name": "agentic-console",
+    "language": "rust",
+    "repo_marker": "Cargo.toml"
+  },
+  "toolchain": {
+    "commands": {
+      "test": {
+        "argv": [
+          "cargo",
+          "test",
+          "--release"
+        ],
+        "description": "unit-test gate: the workspace test suites",
+        "guard": null,
+        "summary": null,
+        "writes": false
+      },
+      "clippy": {
+        "argv": [
+          "cargo",
+          "clippy",
+          "--release",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "description": "lint gate: release clippy over all targets, warnings are errors",
+        "guard": {
+          "marker": "Checking agentic-console",
+          "marker_regex": "\\bChecking\\b\\s+(?P<marker>agentic-console)\\b",
+          "touch_file": "src/main.rs",
+          "reason": "a cached clippy run prints nothing and exits 0, which is indistinguishable from a clean lint; the touched file forces a real check"
+        },
+        "summary": null,
+        "writes": false
+      },
+      "fmt": {
+        "argv": [
+          "cargo",
+          "fmt",
+          "--check"
+        ],
+        "description": "formatting gate: check mode, no files are written",
+        "guard": null,
+        "summary": {
+          "reason": "the fmt payload runs to six figures of characters and the counts exist only inside it, so a role reading the response cannot reach them; counting before the clamp puts the four numbers in the response and in the journal row",
+          "streams": ["stdout", "stderr"],
+          "strip_ansi": true,
+          "counts": {
+            "hunks": {"mode": "count_matching_lines", "pattern": "^Diff in "},
+            "files": {"mode": "count_unique_groups", "pattern": "^Diff in (?P<value>.+?)(?:(?::|\\s+at\\s+line\\s+)\\d+)?:?\\s*$", "group": "value"},
+            "added": {"mode": "count_matching_lines", "pattern": "^\\+"},
+            "removed": {"mode": "count_matching_lines", "pattern": "^-"}
+          }
+        },
+        "writes": false
+      },
+      "policy": {
+        "argv": ["python3", "-m", "pytest", "eval/test_policy.py", "eval/test_deterministic_step.py", "-q"],
+        "description": "policy gate: the governance and deterministic-step eval suites",
+        "guard": null,
+        "summary": null,
+        "writes": false
+      },
+      "conformance": {
+        "argv": ["python3", "scripts/run-conformance-gate.py"],
+        "description": "conformance gate: the prose and citation check, run against base and failing on new drift only",
+        "guard": null,
+        "summary": null,
+        "writes": false
+      },
+      "fmt-fix": {
+        "argv": ["cargo", "fmt", "--all"],
+        "description": "formatting fix: write mode, rewrites files",
+        "guard": null,
+        "summary": null,
+        "writes": true
+      },
+      "webcheck": {
+        "argv": ["npm", "--prefix", "web", "run", "check"],
+        "description": "frontend type-check gate: svelte-kit sync and svelte-check over web/",
+        "guard": null,
+        "summary": null,
+        "writes": false
+      },
+      "webtest": {
+        "argv": ["npm", "--prefix", "web", "run", "test"],
+        "description": "frontend unit-test gate: the vitest suites under web/",
+        "guard": null,
+        "summary": null,
+        "writes": false
+      }
+    },
+    "cache_dirs": [
+      "target"
+    ]
+  },
+  "containers": {
+    "base_image": "agent-sandbox:console",
+    "tools_image": "agent-sandbox:console-m1",
+    "workspace": "/workspace",
+    "memory_subpath": ".memory",
+    "memory_dir": "/workspace/.memory",
+    "registry_volume": "console-cargo-registry",
+    "networks": {
+      "internal": "console-internal",
+      "broker": "console-net"
+    },
+    "broker": {
+      "name": "console-broker",
+      "port": 4000
+    },
+    "read_only_overlays": [
+      "mcp/storage/allow-list.json",
+      "mcp/retrieval/allow-list.json",
+      "docs/routing-and-tool-grant-map.json",
+      "docs/routing-and-tool-grant-map.md"
+    ],
+    "journals": [
+      ".memory/storage-audit.log",
+      ".memory/retrieval-audit.log",
+      ".memory/gate-audit.log"
+    ],
+    "cargo_target_cache": "cargo-target",
+    "cargo_registry_cache": "cargo-registry"
+  },
+  "roles": {
+    "valid": [
+      "orchestrator",
+      "planner",
+      "implementer",
+      "tester",
+      "reviewer",
+      "project-manager",
+      "researcher"
+    ],
+    "mounts": {
+      "orchestrator": {
+        "workspace": "rw",
+        "memory": "ro",
+        "build_cache": "ro"
+      },
+      "planner": {
+        "workspace": "ro",
+        "memory": "rw",
+        "build_cache": "ro"
+      },
+      "implementer": {
+        "workspace": "rw",
+        "memory": "rw",
+        "build_cache": "ro"
+      },
+      "tester": {
+        "workspace": "ro",
+        "memory": "rw",
+        "build_cache": "rw"
+      },
+      "reviewer": {
+        "workspace": "ro",
+        "memory": "rw",
+        "build_cache": "ro"
+      },
+      "project-manager": {
+        "workspace": "ro",
+        "memory": "none",
+        "build_cache": "ro"
+      },
+      "researcher": {
+        "workspace": "ro",
+        "memory": "rw",
+        "build_cache": "ro"
+      }
+    }
+  },
+  "artifacts": {
+    "definitions_dir": ".claude/agents",
+    "skills_dir": ".claude/skills",
+    "settings": ".claude/settings.json",
+    "policy_document": "docs/governance-policy.md",
+    "grant_map_md": "docs/routing-and-tool-grant-map.md",
+    "grant_map_json": "docs/routing-and-tool-grant-map.json",
+    "calibration_log": "docs/calibration-log.md",
+    "step_classification": "docs/step-classification.md",
+    "style_rules": "docs/DOC-STYLE.md",
+    "storage_allow_list": "mcp/storage/allow-list.json",
+    "retrieval_allow_list": "mcp/retrieval/allow-list.json",
+    "storage_server": "mcp/storage/server.py",
+    "retrieval_server": "mcp/retrieval/server.py",
+    "gate_server": "mcp/gate/server.py",
+    "policy_suite": "eval/test_policy.py",
+    "launcher": "scripts/run-agent.sh",
+    "pipeline": ".github/workflows/ci.yml",
+    "project_key": "proj-console",
+    "coursetools_server": "mcp/coursetools_server.py"
+  },
+  "classification": {
+    "governed_globs": [
+      ".claude/agents/*",
+      ".claude/agents/**",
+      ".claude/skills/*",
+      ".claude/skills/**",
+      "mcp/*",
+      "mcp/**",
+      "eval/*",
+      "eval/**",
+      "docs/governance-policy.md",
+      "docs/routing-and-tool-grant-map.md",
+      "docs/routing-and-tool-grant-map.json",
+      "docs/calibration-log.md",
+      "scripts/run-agent.sh",
+      ".github/workflows/*",
+      ".github/workflows/**",
+      "scripts/classify-change.py",
+      "scripts/run-reviewer.py",
+      "scripts/build-audit-trail.py"
+    ],
+    "policy_globs": [
+      "docs/governance-policy.md",
+      "mcp/*/allow-list.json",
+      "docs/routing-and-tool-grant-map.json",
+      "docs/routing-and-tool-grant-map.md",
+      "mcp/*/server.py",
+      "scripts/run-agent.sh",
+      ".github/workflows/*",
+      ".github/workflows/**"
+    ]
+  },
+  "port": {
+    "komun_defaults": {
+      "project.name": "komun",
+      "toolchain.commands.clippy.guard.marker": "Checking komun-server",
+      "toolchain.commands.clippy.guard.marker_regex": "\\bChecking\\b\\s+(?P<marker>komun-server)\\b",
+      "toolchain.commands.clippy.guard.touch_file": "crates/server/src/main.rs",
+      "containers.base_image": "agent-sandbox:komun",
+      "containers.tools_image": "agent-sandbox:komun-m3",
+      "containers.registry_volume": "komun-cargo-registry",
+      "containers.networks.internal": "agent-internal",
+      "containers.networks.broker": "agent-net",
+      "containers.broker.name": "rev-broker",
+      "artifacts.project_key": "proj-komun"
+    },
+    "language_specific_note": [
+      "The cargo toolchain commands, the clippy cache guard and the build cache are Rust and cargo",
+      "specific. A Node or Python fork replaces the whole `toolchain` block and drops the guard, or",
+      "writes a guard of its own: the guard exists only because a cached linter prints nothing."
+    ]
+  },
+  "gates": {
+    "conformance": {
+      "files": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/DOC-STYLE.md",
+        "docs/governance-policy.md",
+        "docs/routing-and-tool-grant-map.md",
+        "docs/policy-reconciliation.md",
+        "docs/step-classification.md",
+        "docs/iteration-log.md",
+        "docs/memory-architecture.md",
+        "docs/orchestration-diagram.md",
+        "mcp/gate/SCHEMA.md",
+        "docs/calibration-log.md"
+      ]
+    }
+  },
+  "console": {
+    "_purpose": [
+      "The runtime facts a terminal console needs that the rest of this file does not carry. A",
+      "console is a window onto the artifacts, never a source of them: it reads this block, the",
+      "journals and `docker ps`, and it never writes inside the repository. Every value below is",
+      "also a Komun default until a fork changes it; a fork that changes one deletes its key from",
+      "`komun_defaults` below, which is exactly what the console reads to flag a value as still",
+      "Komun's rather than the fork's."
+    ],
+    "container": "agent-console-m1",
+    "claude_command": "claude",
+    "claude_flags": ["--agent", "orchestrator", "--permission-mode", "acceptEdits"],
+    "role_container_prefix": "agent-console-m4-",
+    "ports": {"gate": 8101, "storage": 8102, "retrieval": 8103},
+    "evidence_dir": "~/console-run-evidence",
+    "briefs_dir": "~/console-run-evidence/briefs",
+    "checkpoint_fresh_minutes": 30,
+    "ci_jobs": [
+      {"name": "change-type-check", "needs": [], "gating": true},
+      {"name": "policy-gate", "needs": ["change-type-check"], "gating": true},
+      {"name": "eval-gate", "needs": ["change-type-check", "policy-gate"], "gating": true},
+      {"name": "advisory-review", "needs": ["change-type-check", "policy-gate"], "gating": false},
+      {"name": "audit-trail", "needs": ["change-type-check", "policy-gate", "eval-gate", "advisory-review"], "gating": false}
+    ],
+    "orchestration_steps": [
+      {"label": "project-manager opens the ticket", "kind": "role", "role": "project-manager"},
+      {"label": "planner plans", "kind": "role", "role": "planner"},
+      {"label": "HUMAN CHECKPOINT 1 (plan approval)", "kind": "human"},
+      {"label": "implementer writes", "kind": "role", "role": "implementer"},
+      {"label": "tester runs gates", "kind": "role", "role": "tester"},
+      {
+        "label": "reviewer reads the journal and records a verdict",
+        "kind": "role",
+        "role": "reviewer"
+      },
+      {"label": "HUMAN CHECKPOINT 2 (release approval)", "kind": "human"},
+      {"label": "project-manager closes", "kind": "role", "role": "project-manager"}
+    ],
+    "komun_defaults": [
+      "claude_command",
+      "claude_flags",
+      "checkpoint_fresh_minutes",
+      "orchestration_steps"
+    ],
+    "rulings": [
+      {
+        "id": "approve-as-written",
+        "label": "approve as written",
+        "text": "Approved. Proceed with the plan as written.",
+        "prefill": false
+      },
+      {
+        "id": "approve-with-rework",
+        "label": "approve with a rework first",
+        "text": "Approved with one rework first: revise the plan so that <name the change>, then stop at checkpoint 1 again for approval. Do not start implementing before the revised plan is approved.",
+        "prefill": true
+      },
+      {
+        "id": "halt",
+        "label": "halt",
+        "text": "Halt. Do not proceed with the plan: stop this run here and report what you have so far. I will decide the next step.",
+        "prefill": true
+      }
+    ]
+  },
+  "console_probe_cadence": {
+    "_purpose": [
+      "How often each of the console's probes is re-executed. The console takes its snapshots on a",
+      "worker thread and draws the last one it was given, so nothing here makes the screen wait: this",
+      "table is about freshness, not about latency. refresh_seconds is how often a snapshot is taken;",
+      "stale_after_seconds is the age at which the snapshot on the screen is labelled STALE;",
+      "default_ttl_seconds is the TTL of any probe the probes table below does not name. gate_allowlist",
+      "is the expensive one -- it asks the running gate server for its own list_gates, which spawns",
+      "python3 inside the container and imports fastmcp, on the order of a second and a half -- so it is",
+      "asked far less often than the file stats and the container process table. A reading's age on",
+      "screen is the age of the read and never the age of the collect that served it, and `r` forces",
+      "every probe regardless of this table."
+    ],
+    "refresh_seconds": 3,
+    "stale_after_seconds": 15,
+    "default_ttl_seconds": 3,
+    "probes": {
+      "docker_ps": 3,
+      "container_ps": 3,
+      "ports": 5,
+      "sessions": 5,
+      "session_transcript": 5,
+      "gate_journal": 3,
+      "storage_journal": 3,
+      "retrieval_journal": 3,
+      "files": 3,
+      "pipeline": 15,
+      "conversions": 30,
+      "grants": 30,
+      "selftest_record": 15,
+      "port_self_test_record": 15,
+      "evidence_files": 5,
+      "evidence_tails": 5,
+      "gate_allowlist": 30
+    }
+  }
+}

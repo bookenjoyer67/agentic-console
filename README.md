@@ -14,12 +14,37 @@ lives in:
 
 ## This repository
 
-Standalone at `github.com/bookenjoyer67/agentic-console`, and shipped inside the agentic quality-gate kit at
-`console/`, so a fork of the kit gets it without a second clone. A standalone clone names the repository it
-watches: `./open.sh /path/to/repo`.
+This is a **fork of the agentic quality-gate kit**: the machinery that gates software — the gate, storage and
+retrieval servers under `mcp/`, the drivers under `scripts/`, the suites under `eval/`, the role definitions
+under `.claude/agents/`, and the seam table in `agentic.config.json` — together with the console that shows it.
+The kit's own fork check runs here and decides whether the fork is real, which makes this repository the
+demonstration as well as the port: [`docs/fork-proof.md`](docs/fork-proof.md) is the evidence, with the command
+and its output.
+
+The reference project lives in its own repository, where the kit gates a Rust product. Read this one to
+understand the pipeline: it is a tenth the size and holds nothing but the pipeline and the console. It also
+still ships inside the kit at `console/`, so a fork of the kit gets the console without a second clone.
+
+## Settling in
+
+What does a newcomer need before the runtime works?
+
+1. Read [`.env.example`](.env.example). It names every variable the runtime reads, says which component reads
+   it, and states which of them are never credentials. Copy it to `.env` for your own machine; `.env` is
+   ignored by this repository.
+2. Stage your own key material on your host, outside the repository: `sandbox/stage-secrets.sh` writes it into
+   the state directory with mode 0600. Nothing sensitive lives in this repository.
+3. Build the runtime: `sandbox/run-agent.sh` builds the broker from `sandbox/broker` if the image is missing,
+   then starts the agent container on an internal network with a dummy token.
+
+A clone of this repository names the repository it watches, because the console's no-argument default is the
+repository it sits inside:
+
+    cargo build --release && ./open.sh /path/to/repo
 
 | document | what it is |
 | --- | --- |
+| [`docs/fork-proof.md`](docs/fork-proof.md) | the fork evidence: the check, its output, every seam before and after |
 | [docs/architecture.md](docs/architecture.md) | the probe worker, the cache, the modules, the measured numbers |
 | [docs/provenance.md](docs/provenance.md) | the evidence rules: what may name a checkpoint, when a ruling is offered |
 | [docs/screens.md](docs/screens.md) | the three screens and every panel on them |

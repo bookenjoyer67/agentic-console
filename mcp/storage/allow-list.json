@@ -1,0 +1,62 @@
+{
+  "server": "storage",
+  "operations": [
+    "write_entry",
+    "read_entry",
+    "list_entries",
+    "update_entry",
+    "delete_entry"
+  ],
+  "comment": [
+    "File-based allow-list for the storage MCP server: one entry per role, naming exactly the storage operations that role may call.",
+    "The server reads this file at startup and checks it as the first statement of every operation. A (role, operation) pair that is not listed here is refused with an authorization_denied error naming the role, the operation and the roles that ARE allowed, and the refusal is journalled to the same audit log that records the successful calls.",
+    "A role that is absent from 'roles' is an unknown role and is refused, as is a missing or blank role; nothing is defaulted to an allowed role. An empty list means the role is known and holds nothing.",
+    "Derived from docs/routing-and-tool-grant-map.json: every 'mcp__storage__<operation>' string under 'grants.<role>' becomes a grant here, and nothing else does. 'mcp__storage__delete_entry' is granted to no role in that map, so every role's entry omits it.",
+    "Written as valid JSON with no comments: the explanation lives in these string fields."
+  ],
+  "source_of_truth": "docs/routing-and-tool-grant-map.json",
+  "derivation": "grants[role] filtered to the operations this server exposes; retrieval ceilings do not apply here and are not duplicated in this file",
+  "denial_note_by_role": {
+    "orchestrator": "refused every storage operation: it reads and writes orchestration documents instead of project memory",
+    "planner": "refused update_entry and delete_entry: a plan is a new entry, not a revision or a removal",
+    "implementer": "refused delete_entry: it revises its own notes and removes no record",
+    "tester": "refused update_entry and delete_entry: it records a result and alters no earlier record",
+    "reviewer": "refused update_entry and delete_entry: it stays read-only toward work it did not write and records only its own review",
+    "project-manager": "refused write_entry, update_entry and delete_entry: it owns ticket state rather than persistent project memory",
+    "researcher": "refused read_entry and list_entries: it records findings and reads nothing back out of project memory"
+  },
+  "denial_note_by_operation": {
+    "delete_entry": "refused to every role, so record removal stays outside the gate and audit evidence survives; no role holds a destructive capability here"
+  },
+  "roles": {
+    "orchestrator": [],
+    "planner": [
+      "read_entry",
+      "list_entries",
+      "write_entry"
+    ],
+    "implementer": [
+      "read_entry",
+      "list_entries",
+      "write_entry",
+      "update_entry"
+    ],
+    "tester": [
+      "read_entry",
+      "list_entries",
+      "write_entry"
+    ],
+    "reviewer": [
+      "read_entry",
+      "list_entries",
+      "write_entry"
+    ],
+    "project-manager": [
+      "read_entry",
+      "list_entries"
+    ],
+    "researcher": [
+      "write_entry"
+    ]
+  }
+}

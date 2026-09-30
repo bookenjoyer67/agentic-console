@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Komun hard stop (Module 2.4): refuse a commit when .memory/ contains credential-shaped text.
+#
+# Installation: this file lives in the repo, and the repo configures Git to look for hooks here:
+#     git config core.hooksPath scripts/hooks
+# A fresh clone needs that one command to arm it.
+#
+# This is the Git half of the safeguard pair. CLAUDE.md's write policy is the soft guard — it asks the
+# agent to classify content before writing and to refuse Confidential or Secret material. This hook is
+# the hard stop, because it runs at a defined point (after staging, before the commit object exists)
+# and blocks the commit on its own, independently of what any agent decided or believed.
+#
+# Patterns are the lesson's set: sk-, password=, secret=, token=, api_key=, apikey= (case-insensitive).
+# The "=" forms are deliberate. A bare `password`/`secret`/`token` search matches legitimate prose —
+# including .memory/knowledge/coding-standards.md, whose rule 5 is *about* not storing those values —
+# and a guardrail that fires on the documentation of itself gets disabled by whoever hits it first.
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+mem="$root/.memory"
+
+[ -d "$mem" ] || exit 0
+
+hits="$(grep -rInE -i 'sk-[A-Za-z0-9]|password[[:space:]]*=|secret[[:space:]]*=|token[[:space:]]*=|api_key[[:space:]]*=|apikey[[:space:]]*=' "$mem" \
+  --exclude='.gitkeep' 2>/dev/null || true)"
+
+if [ -n "$hits" ]; then
+  echo "pre-commit: BLOCKED — credential-shaped text found under .memory/"
+  echo
+  echo "$hits" | sed 's/^/  /'
+  echo
+  echo "Nothing was committed. Remove the value (store the name of the environment variable instead of"
+  echo "its contents), then stage the file again. If the value is a real credential, rotate it before"
+  echo "doing anything else — it is not in Git history only because this hook stopped the commit."
+  exit 1
+fi
+
+exit 0

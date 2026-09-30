@@ -1,18 +1,163 @@
-name: gate
-
-# The console's own gate. It is small on purpose, and it is the same three commands the crate's
-# documentation tells a reader to run. Every step here passes on the committed tree.
+# The Module 4.2 eval-gated pipeline, ported into this repository (agentic-console) and re-pointed
+# at this repository's own commands.
 #
-# This crate is its own workspace root, so no --manifest-path is needed and no workspace flag applies.
+# Five jobs, one per row of the lesson's governed-pipeline table (lesson 4.2, block [16]). The job
+# keys are the lesson's and are unchanged from the pipeline this was ported from: change-type-check,
+# policy-gate, eval-gate, advisory-review, audit-trail.
+#
+# Which jobs may fail the build:
+#
+#   gating    change-type-check (fails only if it cannot classify), policy-gate, eval-gate
+#   advisory  advisory-review (continue-on-error: true), audit-trail (continue-on-error: true)
+#
+# policy-gate carries no `continue-on-error` on purpose: leaving it at its default of false is what
+# makes a failing job actually fail, and a policy gate is never advisory or demotable.
+#
+# What this repository changed when the pipeline was ported here, and why. The pipeline this was
+# ported from ran every check inside a docker sandbox image pair built from the repository under
+# test. That repository shipped the root Dockerfile that pair's base image is built from; this one
+# does not (`sandbox/Dockerfile.m3` builds FROM a base image that has no Dockerfile here, so no image
+# can be built on a fresh runner). The checks were therefore re-pointed at the commands this
+# repository actually runs:
+#
+#   * the cargo gates are this repository's own three, run directly on the runner at the repository
+#     root: `cargo fmt --check`, `cargo clippy --release --all-targets --offline -- -D warnings` and
+#     `cargo test --release --offline`. `--offline` is what the sandbox toolchain needs, because the
+#     sandbox container reaches no crate registry.
+#   * the policy suites are this repository's copies (`eval/test_policy.py` and
+#     `eval/test_deterministic_step.py`) run against the sandbox's own pinned Python toolchain
+#     (`sandbox/requirements-m3.txt`), which also pins the `pytest-json-report` plugin the report
+#     flag needs.
+#   * the conformance gate is this repository's converted prose-and-citation step
+#     (`python3 scripts/run-conformance-gate.py`), run against HEAD and failing on new drift only.
+#
+# Every `run:` block in this file was executed against this repository's tree, and the result is
+# recorded in the port report.
+
+name: CI
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Least privilege at the workflow level. A job asks for more only where a step uses it.
+permissions:
+  contents: read
 
 jobs:
-  gate:
+  # ---------------------------------------------------------------------------------------------
+  # Row 1 of the lesson's table: "Change Classifier | Which files changed | No | Every run | No |
+  # Job outputs". Classifies deterministic work against agentic work and exports the lesson's two
+  # flags. It never judges the diff, so it never blocks on what it finds; it fails only when it
+  # cannot produce the classification the downstream gates key off, which is fail-closed.
+  # ---------------------------------------------------------------------------------------------
+  change-type-check:
+    name: Change Classifier
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed-files: ${{ steps.classify.outputs.changed-files }}
+      change-type: ${{ steps.classify.outputs.change-type }}
+      requires-governed-check: ${{ steps.classify.outputs.requires-governed-check }}
+      touches-policy: ${{ steps.classify.outputs.touches-policy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The full history, so the base commit of the pull request is present and `git diff`
+          # can compare the two revisions directly.
+          fetch-depth: 0
+
+      - name: Classify the pull request's changed files
+        id: classify
+        env:
+          # The two revisions are trusted values from the event payload and are read from the
+          # environment, not interpolated into the script (no shell re-parsing of event data).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p ci-artifacts
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > ci-artifacts/changed-files.txt
+          echo "changed files ($(wc -l < ci-artifacts/changed-files.txt)):"
+          cat ci-artifacts/changed-files.txt
+          # The classifier owns the rule; it writes the JSON the audit trail reads and appends
+          # requires-governed-check and touches-policy to $GITHUB_OUTPUT.
+          python3 scripts/classify-change.py \
+            --out ci-artifacts/change-classification.json \
+            --github-output \
+            < ci-artifacts/changed-files.txt
+          # The two remaining outputs are read back from the JSON the classifier wrote, so the
+          # workflow never re-implements the rule.
+          echo "changed-files=$(paste -sd' ' ci-artifacts/changed-files.txt)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          data = json.load(open("ci-artifacts/change-classification.json", encoding="utf-8"))
+          print("change-type={}".format(data["change_type"]))
+          PY
+
+      - name: Upload the change classification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-classification
+          path: |
+            ci-artifacts/change-classification.json
+            ci-artifacts/changed-files.txt
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # Row 2: "Policy Test Suite | Whether permissions match the governance policy | No | Every run |
+  # Yes | Policy report". Gating, and it runs on every pull request. It runs this repository's two
+  # Python suites and uploads the JSON report with if: always().
+  # ---------------------------------------------------------------------------------------------
+  policy-gate:
+    name: Policy Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: change-type-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The Python the sandbox image carries, so the pinned toolchain below is the sandbox's.
+          python-version: "3.12"
+
+      # The dependencies are the sandbox's own pinned list, installed rather than baked into an
+      # image, because no image can be built from this repository on a fresh runner. The same file
+      # pins `pytest-json-report`, which is what makes the report flag below runnable at all.
+      - name: Install the Python toolchain
+        run: |
+          python3 -m pip install --disable-pip-version-check -r sandbox/requirements-m3.txt
+
+      - name: Run policy tests
+        run: |
+          mkdir -p ci-artifacts
+          python3 -m pytest eval/test_policy.py eval/test_deterministic_step.py -v \
+            --json-report \
+            --json-report-file=ci-artifacts/policy-report.json
+
+      - name: Upload policy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-report
+          path: ci-artifacts/policy-report.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # Row 3: "Evaluation Harness | Whether agent behavior remains acceptable | Can run both
+  # deterministic and agentic tests | Agent-affecting changes | Yes | Evaluation reports".
+  # Gating, and it runs only when the classifier says the change can affect agent behaviour. The
+  # deterministic checks are this repository's three cargo gates plus its conformance gate.
+  # ---------------------------------------------------------------------------------------------
+  eval-gate:
+    name: Evaluation Harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [change-type-check, policy-gate]
+    if: needs.change-type-check.outputs.requires-governed-check == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -22,11 +167,199 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: format
-        run: cargo fmt --check
+      - name: Run the deterministic gates
+        run: |
+          mkdir -p ci-artifacts
+          python3 - <<'PY'
+          """Run this repository's three cargo gates and write one report.
 
-      - name: lint
-        run: cargo clippy --release --all-targets -- -D warnings
+          The argv tuples are this repository's own toolchain commands, the ones its sandbox and its
+          gate vocabulary run: `cargo test --release --offline`, `cargo clippy --release
+          --all-targets --offline -- -D warnings` and `cargo fmt --check`. Every one of the three is
+          tallied: this tree carries no pre-existing rustfmt drift, so a repo-wide fmt verdict is a
+          verdict rather than noise. The counts are nested under "summary" because that is the shape
+          the audit trail reads (scripts/build-audit-trail.py).
+          """
+          import json
+          import pathlib
+          import subprocess
+          import sys
 
-      - name: tests
-        run: cargo test --release
+          GATES = (
+              ("test", ["cargo", "test", "--release", "--offline"]),
+              (
+                  "clippy",
+                  ["cargo", "clippy", "--release", "--all-targets", "--offline", "--", "-D", "warnings"],
+              ),
+              ("fmt", ["cargo", "fmt", "--check"]),
+          )
+
+          reports = pathlib.Path("ci-artifacts")
+          reports.mkdir(parents=True, exist_ok=True)
+          gates = {}
+          for name, argv in GATES:
+              proc = subprocess.run(argv, capture_output=True, text=True)
+              passed = proc.returncode == 0
+              gates[name] = {
+                  "argv": argv,
+                  "exit_code": proc.returncode,
+                  "passed": passed,
+                  "stdout_tail": proc.stdout[-4000:],
+                  "stderr_tail": proc.stderr[-4000:],
+              }
+              print(
+                  "GATE {} argv={} exit={} passed={}".format(name, argv, proc.returncode, passed),
+                  flush=True,
+              )
+              print(proc.stdout, flush=True)
+              print(proc.stderr, file=sys.stderr, flush=True)
+          counts = {
+              "passed": sum(1 for gate in gates.values() if gate["passed"]),
+              "failed": sum(1 for gate in gates.values() if not gate["passed"]),
+              "total": len(gates),
+          }
+          (reports / "deterministic-report.json").write_text(
+              json.dumps({"summary": counts, "gates": gates}, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print("DETERMINISTIC_RESULT passed={passed} failed={failed} total={total}".format(**counts), flush=True)
+          sys.exit(0 if counts["failed"] == 0 else 1)
+          PY
+
+      - name: Run the conformance gate
+        # always(): a red deterministic gate above must not hide the conformance verdict. The gate
+        # compares each configured file's finding counts against its own HEAD revision and fails on
+        # new drift only; a file HEAD does not carry is reported as files_without_a_baseline and is
+        # not counted as new drift, which is the gate's normal behaviour. Its JSON verdict on stdout
+        # is kept as the report the audit trail consumes.
+        if: always()
+        run: |
+          mkdir -p ci-artifacts
+          set -o pipefail
+          python3 scripts/run-conformance-gate.py | tee ci-artifacts/conformance-report.json
+
+      - name: Upload the deterministic gate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deterministic-report
+          path: |
+            ci-artifacts/deterministic-report.json
+            ci-artifacts/conformance-report.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # Row 5: "Advisory Code Review | Reviews changed code and provides feedback | Yes | Relevant
+  # pull requests | No | Pull request comment". Advisory by construction: the job is marked
+  # continue-on-error, and the step that runs the reviewer captures its exit status and exits 0.
+  # ---------------------------------------------------------------------------------------------
+  advisory-review:
+    name: Advisory Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [change-type-check, policy-gate]
+    # This is what makes a non-zero exit from any step in this job unable to fail the build.
+    continue-on-error: true
+    permissions:
+      contents: read
+      # Used by one step only: the one that posts the review summary as a pull request comment.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the advisory reviewer
+        env:
+          # Secret scoped to the step, not to the job: this step reads one secret,
+          # OPENROUTER_API_KEY, and scripts/run-reviewer.py reads that one name only.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # The classifier's file list, passed through the environment rather than interpolated
+          # into the script, so a file name cannot become a shell token.
+          CHANGED_FILES: ${{ needs.change-type-check.outputs.changed-files }}
+        run: |
+          mkdir -p ci-artifacts
+          set +e
+          printf '%s\n' $CHANGED_FILES | python3 scripts/run-reviewer.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --out-dir ci-artifacts 2>&1 | tee ci-artifacts/review-output.txt
+          status="${PIPESTATUS[0]}"
+          echo "run-reviewer.py exit status: $status (advisory: severity never fails this job)"
+          exit 0
+
+      - name: Post the review summary as a pull request comment
+        # The one consumer of `pull-requests: write`. Advisory: a comment that cannot be posted
+        # (for example on a fork pull request, where GITHUB_TOKEN is read-only) is reported and
+        # ignored rather than failing anything.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ ! -s ci-artifacts/review-summary.md ]; then
+            echo "no review summary was produced; nothing to post"
+            exit 0
+          fi
+          gh pr comment "$PULL_REQUEST_NUMBER" --body-file ci-artifacts/review-summary.md \
+            || echo "the review comment could not be posted (advisory, ignored)"
+
+      - name: Upload the review report and its audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: advisory-review-report
+          path: |
+            ci-artifacts/review-report.json
+            ci-artifacts/review-summary.md
+            ci-artifacts/audit-review.log
+            ci-artifacts/review-output.txt
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # Row 6: "Audit Trail | Combines evidence from the other jobs | No | After the other jobs | No |
+  # Combined artifact". needs: [...] with if: always() is what makes this a separate final job, and
+  # the trail does not decide whether code can merge. continue-on-error makes that structural on
+  # the job.
+  # ---------------------------------------------------------------------------------------------
+  audit-trail:
+    name: Audit Trail
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [change-type-check, policy-gate, eval-gate, advisory-review]
+    if: always()
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every earlier artifact into one directory
+        uses: actions/download-artifact@v4
+        with:
+          path: ci-artifacts
+          merge-multiple: true
+
+      - name: Build the audit trail
+        env:
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          POLICY_GATE_RESULT: ${{ needs.policy-gate.result }}
+          EVAL_GATE_RESULT: ${{ needs.eval-gate.result }}
+          ADVISORY_REVIEW_RESULT: ${{ needs.advisory-review.result }}
+        run: |
+          python3 scripts/build-audit-trail.py \
+            --artifacts-dir ci-artifacts \
+            --sha "$SHA" \
+            --event "$EVENT" \
+            --pull-request "$PULL_REQUEST_NUMBER" \
+            --policy-gate "$POLICY_GATE_RESULT" \
+            --governed-file-gate "$EVAL_GATE_RESULT" \
+            --advisory-review "$ADVISORY_REVIEW_RESULT"
+
+      - name: Upload the audit trail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-trail
+          path: ci-artifacts/audit-trail.json
+          retention-days: 90
+          if-no-files-found: ignore

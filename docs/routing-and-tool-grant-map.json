@@ -1,0 +1,94 @@
+{
+  "project": "proj-komun",
+  "tool_identifier_form": "mcp__<server>__<tool>",
+  "servers": [
+    "coursetools",
+    "storage",
+    "retrieval",
+    "gate"
+  ],
+  "grants": {
+    "orchestrator": [],
+    "planner": [
+      "mcp__coursetools__file_read",
+      "mcp__coursetools__codebase_search",
+      "mcp__storage__read_entry",
+      "mcp__storage__list_entries",
+      "mcp__storage__write_entry",
+      "mcp__retrieval__retrieve"
+    ],
+    "implementer": [
+      "mcp__coursetools__file_read",
+      "mcp__coursetools__file_write",
+      "mcp__coursetools__codebase_search",
+      "mcp__storage__read_entry",
+      "mcp__storage__list_entries",
+      "mcp__storage__write_entry",
+      "mcp__storage__update_entry",
+      "mcp__retrieval__retrieve",
+      "mcp__gate__run_fix"
+    ],
+    "tester": [
+      "mcp__coursetools__file_read",
+      "mcp__storage__read_entry",
+      "mcp__storage__list_entries",
+      "mcp__storage__write_entry",
+      "mcp__gate__run_gate",
+      "mcp__gate__list_gates",
+      "mcp__gate__read_audit_log"
+    ],
+    "reviewer": [
+      "mcp__coursetools__file_read",
+      "mcp__coursetools__codebase_search",
+      "mcp__storage__read_entry",
+      "mcp__storage__list_entries",
+      "mcp__storage__write_entry",
+      "mcp__retrieval__retrieve",
+      "mcp__gate__list_gates",
+      "mcp__gate__read_audit_log"
+    ],
+    "project-manager": [
+      "mcp__coursetools__task_tracker",
+      "mcp__storage__read_entry",
+      "mcp__storage__list_entries"
+    ],
+    "researcher": [
+      "mcp__coursetools__web_search",
+      "mcp__storage__write_entry"
+    ]
+  },
+  "retrieval_ceiling": {
+    "orchestrator": "none",
+    "planner": "internal",
+    "implementer": "internal",
+    "tester": "none",
+    "reviewer": "internal",
+    "project-manager": "none",
+    "researcher": "none"
+  },
+  "converted_steps": {
+    "prose-and-citation-conformance": {
+      "record": "docs/adr/ADR-001-doc-conformance-deterministic-conversion.md",
+      "mcp_access": [],
+      "replacement": "scripts/validate_doc_conformance_deterministic.py",
+      "gate": "conformance"
+    }
+  },
+  "gate_commands": {
+    "source_of_record": "agentic.config.json",
+    "check_mode": [
+      "test",
+      "clippy",
+      "fmt",
+      "policy",
+      "conformance",
+      "webcheck",
+      "webtest"
+    ],
+    "write_mode": [
+      "fmt-fix"
+    ],
+    "authorisation": "per_tool",
+    "role_gate_allow_list": null
+  }
+}

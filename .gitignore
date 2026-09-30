@@ -1,1 +1,4 @@
 /target
+
+# a user's own environment, if they copy the example
+.env
