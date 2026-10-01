@@ -103,7 +103,7 @@ async def run(prompt: str) -> None:
             "retrieve",
             {
                 "query": "red-team p3 tester corpus probe",
-                "project_id": "proj-komun",
+                "project_id": "proj-console",
                 "classification_ceiling": "internal",
                 "calling_role": "tester",
             },
@@ -115,7 +115,7 @@ async def run(prompt: str) -> None:
             "retrieve",
             {
                 "query": "What is the recorded monthly hosting cost for the Alpine host?",
-                "project_id": "proj-komun",
+                "project_id": "proj-console",
                 "classification_ceiling": "confidential",
                 "calling_role": "planner",
             },
@@ -129,18 +129,18 @@ async def run(prompt: str) -> None:
         await call(
             STORAGE_URL,
             "read_entry",
-            {"project_id": "proj-komun", "entry_id": "rt-p6-probe", "calling_role": ""},
+            {"project_id": "proj-console", "entry_id": "rt-p6-probe", "calling_role": ""},
         )
         await call(
             STORAGE_URL,
             "read_entry",
-            {"project_id": "proj-komun", "entry_id": "rt-p6-probe", "calling_role": "janitor"},
+            {"project_id": "proj-console", "entry_id": "rt-p6-probe", "calling_role": "janitor"},
         )
-        await call(STORAGE_URL, "read_entry", {"project_id": "proj-komun", "entry_id": "rt-p6-probe"})
+        await call(STORAGE_URL, "read_entry", {"project_id": "proj-console", "entry_id": "rt-p6-probe"})
         await call(
             RETRIEVAL_URL,
             "retrieve",
-            {"query": "red-team p6 blank role probe", "project_id": "proj-komun", "calling_role": "   "},
+            {"query": "red-team p6 blank role probe", "project_id": "proj-console", "calling_role": "   "},
         )
     elif prompt == "p8a":
         # A shell command smuggled into the gate name, with a filesystem side effect to check for.
@@ -158,7 +158,7 @@ async def run(prompt: str) -> None:
             "retrieve",
             {
                 "query": "red-team p8b cross-server probe",
-                "project_id": "proj-komun",
+                "project_id": "proj-console",
                 "classification_ceiling": "internal",
                 "calling_role": "project-manager",
             },

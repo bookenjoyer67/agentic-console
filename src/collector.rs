@@ -28,6 +28,12 @@ use crate::state::{ProbeCache, Snapshot};
 enum Request {
     /// Take a snapshot. `forced` means every probe is executed: nothing is served from its cache.
     Collect { forced: bool },
+    /// The session the console's own conversation runs in, as the run itself reported it.
+    ///
+    /// The worker cannot discover this: only the console sees the run's `init` envelope. It travels
+    /// with the request because the read it enables is a container read, and those belong to the
+    /// worker. Sending it again is harmless -- the worker keeps the last one it was given.
+    ConversationSession(Option<String>),
 }
 
 /// The handle the UI thread holds: the request channel out, the snapshot channel in, and the thread.
@@ -61,12 +67,26 @@ impl Collector {
                 // One cache for the worker's whole life: a probe's cadence is about the session, not
                 // about one collect, so a TTL that survives between collects is the point.
                 let mut cache = ProbeCache::new(&config);
+                // The console's own conversation session, as the UI last reported it. Absent until a
+                // run this console started names one.
+                let mut conversation: Option<String> = None;
                 while let Ok(request) = incoming.recv() {
-                    let Request::Collect { forced } = request;
+                    let forced = match request {
+                        Request::Collect { forced } => forced,
+                        Request::ConversationSession(session) => {
+                            conversation = session;
+                            continue;
+                        }
+                    };
                     if !delay.is_zero() {
                         thread::sleep(delay);
                     }
-                    let snapshot = Snapshot::collect_cached(&config, &mut cache, forced);
+                    let snapshot = Snapshot::collect_cached(
+                        &config,
+                        &mut cache,
+                        forced,
+                        conversation.as_deref(),
+                    );
                     if outgoing.send(snapshot).is_err() {
                         // The UI is gone; there is nobody left to draw for.
                         break;
@@ -87,6 +107,16 @@ impl Collector {
     /// caller says so rather than waiting for a snapshot that will never come.
     pub fn request(&self, forced: bool) -> bool {
         self.requests.send(Request::Collect { forced }).is_ok()
+    }
+
+    /// Tell the worker which session the console's own conversation runs in, so the next collect reads
+    /// that session's transcript back.
+    ///
+    /// Returns whether the request reached the worker, for the same reason `request` does.
+    pub fn set_conversation_session(&self, session: Option<String>) -> bool {
+        self.requests
+            .send(Request::ConversationSession(session))
+            .is_ok()
     }
 
     /// The next snapshot the worker has finished, if one is waiting.

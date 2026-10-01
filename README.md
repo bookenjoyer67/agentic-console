@@ -5,6 +5,18 @@ is happening right now, and the machinery underneath, and every value on every s
 read, a `docker` call or a command's output. Nothing is invented, nothing is cached without its age
 being shown, and nothing in the repository is ever written.
 
+It is also the surface the pipeline is driven from. The CONVERSATION screen is the primary one: a
+transcript, and a composer under it that sends a prompt after showing you the exact argv it will run.
+Every line of that transcript says where it came from -- your own words, the console's own words, the
+agent's own output -- and a line drawn as CONFIRMED is one whose identity was found in the run's own
+session record, read back from the container. The transcript itself is the one thing the console
+writes, and it writes it in memory.
+
+A turn this console starts runs the agent CLI inside the container, so that turn's agent can write
+inside the workspace, exactly as it can when it is started from a shell -- what it may touch is
+decided by the agent's own permission mode, not by this console. The console's own material stays
+read-only: it offers no `rm`, no container restart, no config write and no git command.
+
 It is pointed at a repository and reads that repository's `agentic.config.json`, so it ports with
 the kit. It ships inside the kit at `console/`, and with no argument it watches the repository it
 lives in:
@@ -36,6 +48,10 @@ What does a newcomer need before the runtime works?
    the state directory with mode 0600. Nothing sensitive lives in this repository.
 3. Build the runtime: `sandbox/run-agent.sh` builds the broker from `sandbox/broker` if the image is missing,
    then starts the agent container on an internal network with a dummy token.
+4. The scorecard driver has a dependency of its own, and it is not on PyPI: `requirements-scorecard.txt`
+   pins Azathoth to one upstream commit, and `python3 -m venv .venv && .venv/bin/pip install -r
+   requirements-scorecard.txt` is the whole install. The console needs none of it — it only reads the
+   artifact the driver writes.
 
 ## Continuous integration
 
@@ -251,19 +267,33 @@ function the confirmation screen calls, against the state the console actually r
 Everything comes from `<repo>/agentic.config.json`. Two blocks matter most here:
 
 * the existing `container`, `toolchain.commands`, `containers`, `roles`, `artifacts`,
-  `classification` and `port.komun_defaults` blocks, which the screens read as they are;
+  `classification` and `port` blocks, which the screens read as they are;
 * the `console` block the console itself uses: `container`, `claude_command`, `claude_flags`,
   `role_container_prefix`, `ports` (gate/storage/retrieval), `session_dir` (where the CLI writes
   session transcripts inside the container: `/root/.claude/projects/<project>`), `evidence_dir` (the
   directory the harness drops its own `run*` transcript copies into; a transcript there is
   attributed to a session only when its own file name carries that session's id), `briefs_dir`,
   `checkpoint_fresh_minutes`, `ci_jobs` (the fallback job list when the workflow file cannot be
-  parsed), `orchestration_steps` (the ordered sequence the FLOW map draws) and `komun_defaults`.
+  parsed) and `orchestration_steps` (the ordered sequence the FLOW map draws).
 
-`console.komun_defaults` lists the keys whose values are still Komun's. The INSPECT screen reads it
-to flag each seam as *still a Komun default* or *changed for this repo*; a fork that changes a value
-deletes its key from that list. `scripts/agentic_config.py`'s embedded `DEFAULT` carries the same
-block, and the two are compared by hand:
+`port` is the seam table, and it is the only place a fork records anything. `port.seams` names the
+dotted keys that carry this repository's identity, so every fork must review them. `port.ancestors` is
+the lineage, oldest first: each entry names a generation and records what it shipped, under `seams`
+(values a fork must change) and `review` (values where staying is right — the CLI's own name, its
+flags, the fallback job list). One record answers two readers. The fork check sweeps a non-kept seam
+and fails while it still equals an ancestor's value; the INSPECT screen marks a value as *still a
+reference's default* by comparing it against the same chain, naming the generation it reaches back to,
+including one two generations back, which a record of the parent alone cannot express.
+
+Two exceptions must be written down rather than assumed, because a check that passes by silence is
+worth nothing: `port.kept` gives the reason a seam deliberately equals an ancestor's, and `port.quoted`
+gives the reason a literal must stay because it quotes something. Both are printed as notes by
+`scripts/port-self-test.sh --fork`. That check also derives the set of files it reads from the tree's
+wiring rather than a hand list, and names the directories it skips with a reason for each.
+
+`scripts/agentic_config.py`'s embedded `DEFAULT` carries the fallback the console uses when a repo has
+no `agentic.config.json`; it does not embed the seam maps, for the reason `docs/fork-proof.md` gives.
+The two are compared by hand:
 
     python3 -c "import sys, json; sys.path.insert(0,'scripts'); import agentic_config as a; \
       print(a.DEFAULT == json.load(open('agentic.config.json')))"

@@ -1,14 +1,19 @@
 //! The actions, and the command construction behind each one.
 //!
-//! Three rules this module exists to hold:
+//! Four rules this module exists to hold:
 //!
 //! * **Every action shows its exact argv before it runs**, and requires a confirmation keypress. The
 //!   argv is executed directly, element by element, never through a shell, so what is displayed is
 //!   what runs.
 //! * **Safety is by construction.** No action removes anything, restarts a container, kills a
-//!   process, writes inside the repository or runs a git command. The full set is the seven below;
+//!   process, writes inside the repository or runs a git command. The full set is the eight below;
 //!   there is no "run an arbitrary command" action to fall back on.
 //! * **A guard refuses before the command is built**, and the reason is a string the UI shows.
+//! * **The one action that is not a reading is `Prompt`.** It sends a turn into a conversation this
+//!   console started, so it is the only command here whose *run* may write inside the workspace: the
+//!   console itself still writes nothing there. Its note lines say so, because an operator reading the
+//!   confirmation screen is owed the difference between what this console does and what the agent it
+//!   drives may do.
 
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
@@ -34,6 +39,12 @@ pub enum ActionKind {
     Brief,
     /// A checkpoint ruling, sent as the run's next invocation with `--resume <session-id>`.
     Ruling,
+    /// A prompt sent to the orchestrator, as a turn of one conversation this console drives.
+    ///
+    /// The first turn mints the conversation's id and starts it; every later turn resumes that id. The
+    /// command is the brief's shape plus the streaming flags, so the console reads the run's own words
+    /// as events -- one envelope a line -- rather than as prose at the end.
+    Prompt,
 }
 
 impl ActionKind {
@@ -47,6 +58,7 @@ impl ActionKind {
             ActionKind::RoleBox => "role-box",
             ActionKind::Brief => "brief",
             ActionKind::Ruling => "ruling",
+            ActionKind::Prompt => "prompt",
         }
     }
 
@@ -60,6 +72,7 @@ impl ActionKind {
             ActionKind::RoleBox => "Launch a role box for one shot",
             ActionKind::Brief => "Start a brief (orchestrator, headless)",
             ActionKind::Ruling => "Approve a checkpoint (ruling, --resume <session-id>)",
+            ActionKind::Prompt => "Prompt the orchestrator (a turn of this conversation)",
         }
     }
 
@@ -73,6 +86,7 @@ impl ActionKind {
             }
             ActionKind::Brief => "the brief: the change request in one sentence",
             ActionKind::Ruling => "the ruling text to send",
+            ActionKind::Prompt => "the prompt: what the orchestrator should do next",
         }
     }
 
@@ -102,6 +116,7 @@ impl ActionKind {
             ActionKind::Brief => "Change request for this repository, in one sentence: make the \
                                   SCHEMA doc clean under rule R1. Repository path: /workspace"
                 .to_string(),
+            ActionKind::Prompt => "Run the fmt gate and report what it says.".to_string(),
             ActionKind::Ruling => match cfg.rulings().iter().find(|r| r.checkpoints.is_empty()) {
                 // The dry run holds no card, so it shows only a wording that answers to no
                 // checkpoint in particular: a ruling scoped to checkpoint 1 would be a wrong
@@ -112,6 +127,20 @@ impl ActionKind {
             _ => String::new(),
         }
     }
+}
+
+/// The conversation this console is driving: its own state, not a reading.
+///
+/// It sits in `Guards` because that is what the command builder reads, and it is the one field here
+/// that is not a reading. The confirmation screen says so on its own line, and `--dry-run` prints it
+/// as the console's own, so nothing that carries a guards summary can present this as something the
+/// console observed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PromptTarget {
+    /// The session every turn after the first resumes.
+    pub session: Option<String>,
+    /// The id minted for the first turn, when there is one.
+    pub minted: Option<String>,
 }
 
 /// The guards the caller could evaluate before the command is built.
@@ -139,6 +168,8 @@ pub struct Guards {
     pub checkpoint_conflict: Option<String>,
     /// Whether the caller actually probed for an in-flight run.
     pub evaluated: bool,
+    /// The conversation this console is driving, if it is driving one.
+    pub prompt: PromptTarget,
 }
 
 impl Default for Guards {
@@ -150,6 +181,7 @@ impl Default for Guards {
             session: SessionEvidence::not_read(),
             checkpoint_conflict: None,
             evaluated: false,
+            prompt: PromptTarget::default(),
         }
     }
 }
@@ -180,15 +212,29 @@ impl Guards {
             " [not evaluated: nothing was probed for]"
         };
         format!(
-            "in_flight={} checkpoint={} {}{probe}{}",
+            "in_flight={} checkpoint={} {}{probe}{}{}",
             self.in_flight,
             self.checkpoint.basis_line(),
             self.session.summary(),
             match &self.checkpoint_conflict {
                 Some(_) => " checkpoint_conflict=true (the reads that named a checkpoint disagree)",
                 None => "",
-            }
+            },
+            self.prompt_line()
         )
+    }
+
+    /// The clause that says whose conversation the console is holding, when it is holding one.
+    ///
+    /// A separate clause from every reading in this summary, and worded as the console's own, because
+    /// it is the one thing here no probe could have produced: `session=` is what the card read, and
+    /// `prompt=` is what this console itself is driving.
+    fn prompt_line(&self) -> &'static str {
+        if self.prompt.session.is_some() || self.prompt.minted.is_some() {
+            " prompt=<the console's own session target; not a reading>"
+        } else {
+            ""
+        }
     }
 }
 
@@ -253,8 +299,8 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// The seven actions, in menu order.
-pub fn all_kinds() -> [ActionKind; 7] {
+/// The eight actions, in menu order.
+pub fn all_kinds() -> [ActionKind; 8] {
     [
         ActionKind::PortSelfTest,
         ActionKind::PolicySuites,
@@ -263,6 +309,7 @@ pub fn all_kinds() -> [ActionKind; 7] {
         ActionKind::RoleBox,
         ActionKind::Brief,
         ActionKind::Ruling,
+        ActionKind::Prompt,
     ]
 }
 
@@ -286,14 +333,15 @@ fn docker_exec_in_workspace(cfg: &Config, command: &[String]) -> Vec<String> {
 
 /// The actions whose exact command is a `docker exec` inside the container.
 ///
-/// One list, so the argv-order test covers every such action and a fifth one cannot be added
+/// One list, so the argv-order test covers every such action and a sixth one cannot be added
 /// without the test noticing it.
-pub fn docker_exec_kinds() -> [ActionKind; 4] {
+pub fn docker_exec_kinds() -> [ActionKind; 5] {
     [
         ActionKind::GateSelftest,
         ActionKind::Gate,
         ActionKind::Brief,
         ActionKind::Ruling,
+        ActionKind::Prompt,
     ]
 }
 
@@ -675,6 +723,106 @@ pub fn build(
                 note,
             })
         }
+        ActionKind::Prompt => {
+            if value.is_empty() {
+                return Err("the prompt is empty; write it first".to_string());
+            }
+            if value.chars().count() > 32_000 {
+                return Err(format!(
+                    "refused: the prompt is {} characters, over the 32000 the console will pass to \
+                     a single command line",
+                    value.chars().count()
+                ));
+            }
+            if guards.in_flight {
+                return Err(
+                    "refused: an orchestrated run is already in flight in this container. A second \
+                     run would share the workspace and the journals with it. Approve the checkpoint \
+                     or wait for the run to end."
+                        .to_string(),
+                );
+            }
+            // Two shapes, and which one is right is decided by the console's own state rather than by
+            // a reading: a conversation this console has not started yet is opened with a minted id,
+            // and every turn after that resumes that id.
+            let mut command = match &guards.prompt.session {
+                Some(session) => {
+                    let mut command = vec![
+                        cfg.console.claude_command.clone(),
+                        "--resume".to_string(),
+                        session.clone(),
+                        "-p".to_string(),
+                        value.to_string(),
+                    ];
+                    // The session carries the agent identity forward, so only the flags that are not
+                    // about that identity are re-sent -- the same rule the ruling follows.
+                    command.extend(
+                        cfg.console
+                            .claude_flags
+                            .iter()
+                            .filter(|flag| !matches!(flag.as_str(), "--agent" | "orchestrator"))
+                            .cloned(),
+                    );
+                    command
+                }
+                None => {
+                    // Refused rather than minted here: `build` is called by the dry run too, and a dry
+                    // run that minted an id would be a command builder with a side effect. The id is
+                    // minted by the caller that intends to send, so the confirmation screen can show
+                    // the exact id the turn will carry.
+                    let minted = guards.prompt.minted.clone().ok_or_else(|| {
+                        "refused: this would be the first turn of a new conversation and no session \
+                         id was minted for it"
+                            .to_string()
+                    })?;
+                    let mut command = vec![
+                        cfg.console.claude_command.clone(),
+                        "--session-id".to_string(),
+                        minted,
+                        "-p".to_string(),
+                        value.to_string(),
+                    ];
+                    command.extend(cfg.console.claude_flags.clone());
+                    command
+                }
+            };
+            // The flags that make the run's own words arrive as events, after the prompt itself so a
+            // prompt starting with a hyphen can never be read as a flag.
+            command.extend(cfg.console.conversation.stream_flags.clone());
+            let argv = docker_exec_in_workspace(cfg, &command);
+            let note = vec![
+                format!(
+                    "streamed as events: console.conversation.stream_flags carries {}",
+                    cfg.console.conversation.stream_flags.join(" ")
+                ),
+                match &guards.prompt.session {
+                    Some(session) => format!(
+                        "resumed by id ({session}), never by `--continue`, which would resume \
+                         whichever session in the container happens to be newest"
+                    ),
+                    None => format!(
+                        "the session id was minted by this console ({}) and passed as --session-id, \
+                         so the console knows which conversation this is from its first turn",
+                        guards.prompt.minted.clone().unwrap_or_default()
+                    ),
+                },
+                "this console writes nothing into the repository; the agent this turn drives can, \
+                 and what it may touch is decided by its own permission mode (console.claude_flags)"
+                    .to_string(),
+                "the run is headless and the orchestrator stops at the first human checkpoint"
+                    .to_string(),
+            ];
+            Ok(Command {
+                kind,
+                guards,
+                value: value.to_string(),
+                argv,
+                cwd: cfg.repo.clone(),
+                env: Vec::new(),
+                writes: Vec::new(),
+                note,
+            })
+        }
     }
 }
 
@@ -731,6 +879,22 @@ pub fn ruling_refusal(cfg: &Config, state: CardState) -> String {
 /// The dry-run rendering of one action: what it would run, and what it refuses.
 pub fn dry_run_line(cfg: &Config, kind: ActionKind, value: &str, guards: &Guards) -> String {
     let mut out = String::new();
+    // The prompt action's argv carries the id the console mints for the first turn of a conversation.
+    // A preview has no conversation, so it mints one *for the preview*: without it the one action whose
+    // whole shape is the minted id could never be previewed at all. It is a throwaway -- nothing is
+    // sent, the id is used by nothing -- and the preview says so in its own line, because the note a
+    // real turn prints ("passed as --session-id ...") would be a claim about a turn that never ran.
+    let mut guards = guards.clone();
+    let mut minted_for_preview = false;
+    if kind == ActionKind::Prompt
+        && guards.prompt.session.is_none()
+        && guards.prompt.minted.is_none()
+    {
+        if let Ok(id) = crate::uuid::v4() {
+            guards.prompt.minted = Some(id);
+            minted_for_preview = true;
+        }
+    }
     let mut built = false;
     out.push_str(&format!("action   : {} ({})\n", kind.id(), kind.title()));
     match build(cfg, kind, value, guards.clone()) {
@@ -757,6 +921,11 @@ pub fn dry_run_line(cfg: &Config, kind: ActionKind, value: &str, guards: &Guards
             );
             for line in &command.note {
                 out.push_str(&format!("note     : {line}\n"));
+            }
+            if minted_for_preview {
+                out.push_str(
+                    "note     : the id above was minted for this preview alone; nothing was sent\n",
+                );
             }
         }
         Err(reason) => out.push_str(&format!("REFUSED  : {reason}\n")),
@@ -810,6 +979,10 @@ pub fn dry_run_all(cfg: &Config) -> String {
         session: snapshot.live.checkpoint.session.clone(),
         checkpoint_conflict: snapshot.live.checkpoint.checkpoint_conflict.clone(),
         evaluated: true,
+        // The dry run drives no conversation. The one thing it does mint is the prompt action's
+        // preview id, inside `dry_run_line` and nowhere else: a preview that could not show the
+        // `--session-id` shape would not be a preview of that action at all.
+        prompt: PromptTarget::default(),
     };
     let mut out = String::new();
     out.push_str("agentic-console --dry-run-actions\n");
@@ -904,6 +1077,10 @@ pub fn dry_run_one(cfg: &Config, id: &str, value: Option<&str>) -> Result<String
         session: snapshot.live.checkpoint.session.clone(),
         checkpoint_conflict: snapshot.live.checkpoint.checkpoint_conflict.clone(),
         evaluated: true,
+        // `--dry-run-action prompt` with no conversation running: the builder refuses for the want of
+        // a minted id rather than minting one, because a dry run must have no side effect. The
+        // refusal is the honest answer -- this console is not driving a conversation in this mode.
+        prompt: PromptTarget::default(),
     };
     Ok(dry_run_line(cfg, kind, &value, &guards))
 }

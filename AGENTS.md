@@ -19,8 +19,11 @@ console at the repository root; its manifest names it `agentic-console` (`Cargo.
 
 The console is a terminal window onto a repository's quality gate (`README.md:3` `A terminal window
 onto a repository's agentic quality gate.`). It reads files, makes `docker` calls and reads command
-output. It writes nothing inside a repository it watches, and its own description says so
-(`Cargo.toml:5` `Read-only by construction.`).
+output. It is also the surface one conversation with the agent is driven from: CONVERSATION is the
+primary screen, and a prompt sent from it runs the agent CLI inside the container, whose own permission
+mode decides what that turn may touch. The console's own material stays read-only toward the
+repository, and its own description says so
+(`Cargo.toml:5` `Read-only toward the repository, by construction.`).
 
 This fork deliberately keeps the whole pipeline, including the seam table. The kit's own instrument
 decides whether the fork is real, and `docs/fork-proof.md` carries the check and its output
@@ -88,7 +91,8 @@ Which paths make up the pipeline and the console, and what must a change watch f
 | Path | What | Watch for |
 |---|---|---|
 | `mcp/` | Gate, storage and retrieval MCP servers, plus the course-tools server | The gate server runs allowlisted names only, and it takes no command string |
-| `scripts/` | Drivers: the role launcher, the change classifier, the conformance gate, the config loader | The loader is stdlib only, and it falls back to its embedded defaults |
+| `scripts/` | Drivers: the role launcher, the change classifier, the conformance gate, the scorecard, the config loader | The loader is stdlib only, and it falls back to its embedded defaults |
+| `requirements-scorecard.txt` | The scorecard driver's pinned host dependency | Pinned to a commit on purpose: `azathoth-ai` is not on PyPI, and PyPI's `azathoth` is a different project |
 | `eval/` | The policy suite and the deterministic-step suite | Run these under pytest inside the container, never on the host |
 | `.claude/agents/` | Seven governed role definitions, plus two retired `komun-` definitions | The routing map is the decision of record when the two disagree |
 | `agentic.config.json` | The single seam table every consumer reads | Edit this file and each consumer's fallback together |
@@ -140,11 +144,15 @@ cargo test --release --offline                                 # the console's f
 ```
 
 - The console's suite renders each screen into ratatui's `TestBackend` and asserts on the frame; its
-  fixture repository is synthetic, so it depends on no particular checkout.
+  fixture repository is synthetic, so it depends on no particular checkout. It renders at the six sizes
+  the design targets, from 80x24 to 230x60, so a green suite means the narrow terminals are covered too.
 - The formatting step is CI's first one (`.github/workflows/ci.yml:26` `run: cargo fmt --check`).
 - The pipeline's own suites run under pytest inside the container
   (`python3 -m pytest eval/test_policy.py eval/test_deterministic_step.py -q` -> `90 passed`).
-- The last measured console run is `cargo test --release` -> `52 passed, 0 failed`.
+- The last measured console run is `cargo test --release` -> `138 passed, 0 failed` (59 unit tests, 71
+  frame tests, 8 refresh tests). Re-run it after touching the sources: a count read from a run that printed
+  no `Compiling` line is the *previous* binary's count, and appending to a test file with a heredoc can
+  leave an mtime older than the binary that was built before it.
 
 ## Security model (short)
 
@@ -159,8 +167,11 @@ credentials so the agent container never does`). The broker refuses every path t
 provider API path (`sandbox/broker/broker.py:256` `broker only forwards provider API paths`).
 Credentials stay outside the repository (`sandbox/stage-secrets.sh:14` `STATE="${HOME}/.config/komun-sandbox"`).
 
-The console is read-only by construction (`Cargo.toml:5` `Read-only by construction.`). It offers no
-`rm`, no container restart, no config write and no git command.
+The console's own material is read-only toward the repository
+(`Cargo.toml:5` `Read-only toward the repository, by construction.`). It offers no `rm`, no container
+restart, no config write and no git command. A turn it starts is a different thing: it runs the agent
+CLI in the container, and what that agent writes is what its own permission mode allows, exactly as it
+is when a shell starts it.
 
 **Honest limitation:** none of this holds if the host itself is compromised, because the broker runs
 as a normal user on that host and mounts the credential files directly.

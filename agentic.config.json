@@ -57,47 +57,89 @@
         "guard": null,
         "summary": {
           "reason": "the fmt payload runs to six figures of characters and the counts exist only inside it, so a role reading the response cannot reach them; counting before the clamp puts the four numbers in the response and in the journal row",
-          "streams": ["stdout", "stderr"],
+          "streams": [
+            "stdout",
+            "stderr"
+          ],
           "strip_ansi": true,
           "counts": {
-            "hunks": {"mode": "count_matching_lines", "pattern": "^Diff in "},
-            "files": {"mode": "count_unique_groups", "pattern": "^Diff in (?P<value>.+?)(?:(?::|\\s+at\\s+line\\s+)\\d+)?:?\\s*$", "group": "value"},
-            "added": {"mode": "count_matching_lines", "pattern": "^\\+"},
-            "removed": {"mode": "count_matching_lines", "pattern": "^-"}
+            "hunks": {
+              "mode": "count_matching_lines",
+              "pattern": "^Diff in "
+            },
+            "files": {
+              "mode": "count_unique_groups",
+              "pattern": "^Diff in (?P<value>.+?)(?:(?::|\\s+at\\s+line\\s+)\\d+)?:?\\s*$",
+              "group": "value"
+            },
+            "added": {
+              "mode": "count_matching_lines",
+              "pattern": "^\\+"
+            },
+            "removed": {
+              "mode": "count_matching_lines",
+              "pattern": "^-"
+            }
           }
         },
         "writes": false
       },
       "policy": {
-        "argv": ["python3", "-m", "pytest", "eval/test_policy.py", "eval/test_deterministic_step.py", "-q"],
+        "argv": [
+          "python3",
+          "-m",
+          "pytest",
+          "eval/test_policy.py",
+          "eval/test_deterministic_step.py",
+          "-q"
+        ],
         "description": "policy gate: the governance and deterministic-step eval suites",
         "guard": null,
         "summary": null,
         "writes": false
       },
       "conformance": {
-        "argv": ["python3", "scripts/run-conformance-gate.py"],
+        "argv": [
+          "python3",
+          "scripts/run-conformance-gate.py"
+        ],
         "description": "conformance gate: the prose and citation check, run against base and failing on new drift only",
         "guard": null,
         "summary": null,
         "writes": false
       },
       "fmt-fix": {
-        "argv": ["cargo", "fmt", "--all"],
+        "argv": [
+          "cargo",
+          "fmt",
+          "--all"
+        ],
         "description": "formatting fix: write mode, rewrites files",
         "guard": null,
         "summary": null,
         "writes": true
       },
       "webcheck": {
-        "argv": ["npm", "--prefix", "web", "run", "check"],
+        "argv": [
+          "npm",
+          "--prefix",
+          "web",
+          "run",
+          "check"
+        ],
         "description": "frontend type-check gate: svelte-kit sync and svelte-check over web/",
         "guard": null,
         "summary": null,
         "writes": false
       },
       "webtest": {
-        "argv": ["npm", "--prefix", "web", "run", "test"],
+        "argv": [
+          "npm",
+          "--prefix",
+          "web",
+          "run",
+          "test"
+        ],
         "description": "frontend unit-test gate: the vitest suites under web/",
         "guard": null,
         "summary": null,
@@ -135,7 +177,9 @@
       ".memory/gate-audit.log"
     ],
     "cargo_target_cache": "cargo-target",
-    "cargo_registry_cache": "cargo-registry"
+    "cargo_registry_cache": "cargo-registry",
+    "target_volume": "console-cargo-target",
+    "seed_container": "agent-console-m1"
   },
   "roles": {
     "valid": [
@@ -239,24 +283,169 @@
     ]
   },
   "port": {
-    "komun_defaults": {
-      "project.name": "komun",
-      "toolchain.commands.clippy.guard.marker": "Checking komun-server",
-      "toolchain.commands.clippy.guard.marker_regex": "\\bChecking\\b\\s+(?P<marker>komun-server)\\b",
-      "toolchain.commands.clippy.guard.touch_file": "crates/server/src/main.rs",
-      "containers.base_image": "agent-sandbox:komun",
-      "containers.tools_image": "agent-sandbox:komun-m3",
-      "containers.registry_volume": "komun-cargo-registry",
-      "containers.networks.internal": "agent-internal",
-      "containers.networks.broker": "agent-net",
-      "containers.broker.name": "rev-broker",
-      "artifacts.project_key": "proj-komun"
+    "seams": [
+      "project.name",
+      "toolchain.commands.clippy.guard.marker",
+      "toolchain.commands.clippy.guard.marker_regex",
+      "toolchain.commands.clippy.guard.touch_file",
+      "containers.base_image",
+      "containers.tools_image",
+      "containers.registry_volume",
+      "containers.target_volume",
+      "containers.seed_container",
+      "containers.networks.internal",
+      "containers.networks.broker",
+      "containers.broker.name",
+      "artifacts.project_key",
+      "console.container",
+      "console.ports",
+      "console.role_container_prefix"
+    ],
+    "ancestors": [
+      {
+        "name": "komun",
+        "seams": {
+          "project.name": "komun",
+          "toolchain.commands.clippy.guard.marker": "Checking komun-server",
+          "toolchain.commands.clippy.guard.marker_regex": "\\bChecking\\b\\s+(?P<marker>komun-server)\\b",
+          "toolchain.commands.clippy.guard.touch_file": "crates/server/src/main.rs",
+          "containers.base_image": "agent-sandbox:komun",
+          "containers.tools_image": "agent-sandbox:komun-m3",
+          "containers.registry_volume": "komun-cargo-registry",
+          "containers.networks.internal": "agent-internal",
+          "containers.networks.broker": "agent-net",
+          "containers.broker.name": "rev-broker",
+          "artifacts.project_key": "proj-komun",
+          "console.container": "agent-rev-m3",
+          "console.ports": {
+            "gate": 8003,
+            "storage": 8001,
+            "retrieval": 8002
+          },
+          "console.role_container_prefix": "agent-rev-m4-"
+        },
+        "literals": [
+          "rev-cargo-target",
+          "agent-rev-m3",
+          "agent-komun",
+          "crates/server",
+          "komun-server",
+          "komun-agent-exercise-4-3"
+        ],
+        "review": {
+          "console.claude_command": "claude",
+          "console.claude_flags": [
+            "--agent",
+            "orchestrator",
+            "--permission-mode",
+            "acceptEdits"
+          ],
+          "console.evidence_dir": "~/komun-agent-exercise-4-3",
+          "console.briefs_dir": "~/komun-agent-exercise-4-3/briefs",
+          "console.session_dir": "/root/.claude/projects/-workspace",
+          "console.checkpoint_fresh_minutes": 30,
+          "console.ci_jobs": [
+            {
+              "name": "change-type-check",
+              "needs": [],
+              "gating": true
+            },
+            {
+              "name": "policy-gate",
+              "needs": [
+                "change-type-check"
+              ],
+              "gating": true
+            },
+            {
+              "name": "eval-gate",
+              "needs": [
+                "change-type-check",
+                "policy-gate"
+              ],
+              "gating": true
+            },
+            {
+              "name": "advisory-review",
+              "needs": [
+                "change-type-check",
+                "policy-gate"
+              ],
+              "gating": false
+            },
+            {
+              "name": "audit-trail",
+              "needs": [
+                "change-type-check",
+                "policy-gate",
+                "eval-gate",
+                "advisory-review"
+              ],
+              "gating": false
+            }
+          ],
+          "console.orchestration_steps": [
+            {
+              "label": "project-manager opens the ticket",
+              "kind": "role",
+              "role": "project-manager"
+            },
+            {
+              "label": "planner plans",
+              "kind": "role",
+              "role": "planner"
+            },
+            {
+              "label": "HUMAN CHECKPOINT 1 (plan approval)",
+              "kind": "human"
+            },
+            {
+              "label": "implementer writes",
+              "kind": "role",
+              "role": "implementer"
+            },
+            {
+              "label": "tester runs gates",
+              "kind": "role",
+              "role": "tester"
+            },
+            {
+              "label": "reviewer reads the journal and records a verdict",
+              "kind": "role",
+              "role": "reviewer"
+            },
+            {
+              "label": "HUMAN CHECKPOINT 2 (release approval)",
+              "kind": "human"
+            },
+            {
+              "label": "project-manager closes",
+              "kind": "role",
+              "role": "project-manager"
+            }
+          ]
+        }
+      }
+    ],
+    "quoted": [
+      {
+        "value": "crates/server",
+        "file": "scripts/validate_doc_conformance_deterministic.py",
+        "why": "quotes docs/DOC-STYLE.md's v1-form example verbatim to define rule R2"
+      },
+      {
+        "value": "komun",
+        "file": ".claude/agents/reviewer.md",
+        "why": "names the retired role definition kept at .claude/agents/komun-docs-stylist.md, a file that exists in this tree and is annotated RETIRED there. A note about a file has to name it, and the retirement note is itself part of the record."
+      }
+    ],
+    "kept": {
+      "console.ports": "restored to Komun's values because those were the ones that agreed with the servers this kit starts; agentic-console's 8101/8102/8103 disagreed with both the servers and its own Rust fallback (src/config.rs:176-178)"
     },
-    "language_specific_note": [
-      "The cargo toolchain commands, the clippy cache guard and the build cache are Rust and cargo",
-      "specific. A Node or Python fork replaces the whole `toolchain` block and drops the guard, or",
-      "writes a guard of its own: the guard exists only because a cached linter prints nothing."
-    ]
+    "records": {
+      ".claude/agents/komun-contract-auditor.md": "a retired role definition, annotated RETIRED, kept as the record of the work it did; AGENTS.md calls it one of two retired definitions",
+      ".claude/agents/komun-docs-stylist.md": "a retired role definition, annotated RETIRED, kept as the record of the work it did; AGENTS.md calls it one of two retired definitions"
+    }
   },
   "gates": {
     "conformance": {
@@ -280,45 +469,106 @@
     "_purpose": [
       "The runtime facts a terminal console needs that the rest of this file does not carry. A",
       "console is a window onto the artifacts, never a source of them: it reads this block, the",
-      "journals and `docker ps`, and it never writes inside the repository. Every value below is",
-      "also a Komun default until a fork changes it; a fork that changes one deletes its key from",
-      "`komun_defaults` below, which is exactly what the console reads to flag a value as still",
-      "Komun's rather than the fork's."
+      "journals and `docker ps`, and it never writes inside the repository. Whether one of these",
+      "values is still a reference project's is not recorded here: `port.ancestors` holds what each",
+      "generation shipped, so the console answers that by comparing values and names the generation."
     ],
     "container": "agent-console-m1",
     "claude_command": "claude",
-    "claude_flags": ["--agent", "orchestrator", "--permission-mode", "acceptEdits"],
+    "claude_flags": [
+      "--agent",
+      "orchestrator",
+      "--permission-mode",
+      "acceptEdits"
+    ],
     "role_container_prefix": "agent-console-m4-",
-    "ports": {"gate": 8101, "storage": 8102, "retrieval": 8103},
+    "ports": {
+      "gate": 8003,
+      "storage": 8001,
+      "retrieval": 8002
+    },
     "evidence_dir": "~/console-run-evidence",
     "briefs_dir": "~/console-run-evidence/briefs",
     "checkpoint_fresh_minutes": 30,
     "ci_jobs": [
-      {"name": "change-type-check", "needs": [], "gating": true},
-      {"name": "policy-gate", "needs": ["change-type-check"], "gating": true},
-      {"name": "eval-gate", "needs": ["change-type-check", "policy-gate"], "gating": true},
-      {"name": "advisory-review", "needs": ["change-type-check", "policy-gate"], "gating": false},
-      {"name": "audit-trail", "needs": ["change-type-check", "policy-gate", "eval-gate", "advisory-review"], "gating": false}
+      {
+        "name": "change-type-check",
+        "needs": [],
+        "gating": true
+      },
+      {
+        "name": "policy-gate",
+        "needs": [
+          "change-type-check"
+        ],
+        "gating": true
+      },
+      {
+        "name": "eval-gate",
+        "needs": [
+          "change-type-check",
+          "policy-gate"
+        ],
+        "gating": true
+      },
+      {
+        "name": "advisory-review",
+        "needs": [
+          "change-type-check",
+          "policy-gate"
+        ],
+        "gating": false
+      },
+      {
+        "name": "audit-trail",
+        "needs": [
+          "change-type-check",
+          "policy-gate",
+          "eval-gate",
+          "advisory-review"
+        ],
+        "gating": false
+      }
     ],
     "orchestration_steps": [
-      {"label": "project-manager opens the ticket", "kind": "role", "role": "project-manager"},
-      {"label": "planner plans", "kind": "role", "role": "planner"},
-      {"label": "HUMAN CHECKPOINT 1 (plan approval)", "kind": "human"},
-      {"label": "implementer writes", "kind": "role", "role": "implementer"},
-      {"label": "tester runs gates", "kind": "role", "role": "tester"},
+      {
+        "label": "project-manager opens the ticket",
+        "kind": "role",
+        "role": "project-manager"
+      },
+      {
+        "label": "planner plans",
+        "kind": "role",
+        "role": "planner"
+      },
+      {
+        "label": "HUMAN CHECKPOINT 1 (plan approval)",
+        "kind": "human"
+      },
+      {
+        "label": "implementer writes",
+        "kind": "role",
+        "role": "implementer"
+      },
+      {
+        "label": "tester runs gates",
+        "kind": "role",
+        "role": "tester"
+      },
       {
         "label": "reviewer reads the journal and records a verdict",
         "kind": "role",
         "role": "reviewer"
       },
-      {"label": "HUMAN CHECKPOINT 2 (release approval)", "kind": "human"},
-      {"label": "project-manager closes", "kind": "role", "role": "project-manager"}
-    ],
-    "komun_defaults": [
-      "claude_command",
-      "claude_flags",
-      "checkpoint_fresh_minutes",
-      "orchestration_steps"
+      {
+        "label": "HUMAN CHECKPOINT 2 (release approval)",
+        "kind": "human"
+      },
+      {
+        "label": "project-manager closes",
+        "kind": "role",
+        "role": "project-manager"
+      }
     ],
     "rulings": [
       {
@@ -326,35 +576,45 @@
         "label": "approve as written",
         "text": "Approved. Proceed with the plan as written.",
         "prefill": false,
-        "checkpoints": [1]
+        "checkpoints": [
+          1
+        ]
       },
       {
         "id": "approve-with-rework",
         "label": "approve with a rework first",
         "text": "Approved with one rework first: revise the plan so that <name the change>, then stop at checkpoint 1 again for approval. Do not start implementing before the revised plan is approved.",
         "prefill": true,
-        "checkpoints": [1]
+        "checkpoints": [
+          1
+        ]
       },
       {
         "id": "release-as-written",
         "label": "release as written",
         "text": "Approved: release as written. Close the ticket and stop.",
         "prefill": false,
-        "checkpoints": [2]
+        "checkpoints": [
+          2
+        ]
       },
       {
         "id": "release-with-followup",
         "label": "release, with a follow-up",
         "text": "Approved: release as written, then open a follow-up for <name the follow-up>. Stop after opening it.",
         "prefill": true,
-        "checkpoints": [2]
+        "checkpoints": [
+          2
+        ]
       },
       {
         "id": "hold-open",
         "label": "hold the ticket open",
         "text": "Hold: do not close the ticket yet. Report what remains open and stop.",
         "prefill": true,
-        "checkpoints": [2]
+        "checkpoints": [
+          2
+        ]
       },
       {
         "id": "halt",
@@ -387,12 +647,14 @@
       "ports": 5,
       "sessions": 5,
       "session_transcript": 5,
+      "conversation_transcript": 3,
       "gate_journal": 3,
       "storage_journal": 3,
       "retrieval_journal": 3,
       "files": 3,
       "pipeline": 15,
       "conversions": 30,
+      "scorecards": 30,
       "grants": 30,
       "selftest_record": 15,
       "port_self_test_record": 15,

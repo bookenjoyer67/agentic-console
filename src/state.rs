@@ -177,6 +177,10 @@ pub struct LiveView {
     /// The comparison is made against what the probe layer actually read, never against a count
     /// reconstructed from the card's prose, so the guard rests on the same reading the card does.
     pub session_transcript_lines: Option<usize>,
+    /// The console's own session, read back from its tail: what the transcript's LIVE lines are
+    /// confirmed against. Not the card's session -- this one is attributed to the id the run the
+    /// console started reported, and the console reconciles against nothing else.
+    pub conversation_transcript: Reading<Option<probe::TranscriptRead>>,
     /// What `docker exec <container> ps` actually returned, so the reading can be checked.
     pub procs: Vec<ProcLine>,
     pub proc_total: usize,
@@ -256,6 +260,33 @@ pub struct ConversionRow {
     pub source: String,
 }
 
+/// One ranked revision in the Azathoth scorecard artifact.
+///
+/// The scorecard is scored evidence, not a verdict on the sandbox: which axes carry a measurement
+/// and which do not is part of the artifact, and it is carried here so the panel can say it.
+#[derive(Clone, Debug)]
+pub struct ScorecardRow {
+    pub rank: u32,
+    pub revision: String,
+    pub overall: String,
+    pub quality: String,
+    pub cases: String,
+}
+
+/// One read of the scorecard artifact: the ranked rows, and the artifact's own clauses about itself.
+///
+/// They travel together because they are read from one file in one read, and the winner's name and
+/// the unmeasured-axis sentence are only true of the rows beside them. (It was tempting to carry
+/// the winner in prose beside the panel, but then a sentence about a scorecard could outlive the
+/// scorecard it describes.)
+#[derive(Clone, Debug)]
+pub struct ScorecardReading {
+    pub rows: Vec<ScorecardRow>,
+    pub winner: String,
+    /// The artifact's own sentence naming the axes that carry no measurement.
+    pub axes: String,
+}
+
 /// One architecture decision record under the ADR directory.
 #[derive(Clone, Debug)]
 pub struct AdrRow {
@@ -282,6 +313,17 @@ pub struct InspectView {
     pub conversions: Vec<ConversionRow>,
     pub conversion_source: String,
     pub conversion_age: String,
+    /// The ranked revisions the Azathoth scorecard artifact holds, and where that artifact was read.
+    pub scorecards: Vec<ScorecardRow>,
+    pub scorecard_source: String,
+    pub scorecard_age: String,
+    pub scorecard_winner: String,
+    /// The artifact's OWN sentence naming the axes that carry no measurement, printed on screen so a
+    /// normalized score is never read as a total verdict.
+    pub scorecard_axes: String,
+    /// `None` when the artifact was read; the reason when it was not, so "no scorecard has been
+    /// written yet" and "the read failed" stay two different findings.
+    pub scorecard_note: Option<String>,
     pub adrs: Vec<AdrRow>,
 }
 
@@ -299,6 +341,8 @@ pub struct Probes {
     pub files: BTreeMap<String, FileMeta>,
     pub pipeline: Reading<Pipeline>,
     pub conversions: Reading<Vec<ConversionRow>>,
+    /// The Azathoth scorecard under `console.evidence_dir/scorecards`, read as a file.
+    pub scorecards: Reading<ScorecardReading>,
     pub grants: Reading<Grants>,
     pub gate_allowlist: Reading<Vec<String>>,
     pub selftest_finding: Reading<Option<(Finding, SystemTime)>>,
@@ -310,6 +354,12 @@ pub struct Probes {
     /// The tails the console read from that directory: the newest transcript, and the newest one
     /// that carries the session id the card names. A file the card quotes is always one of these.
     pub evidence_tails: Reading<Vec<EvidenceTail>>,
+    /// The console's own session's tail: the read that confirms the transcript this console drew.
+    ///
+    /// `session_id` is the id the run itself reported, so a read that names another session is not an
+    /// answer about this one and confirms nothing. `Reading::failed` while no run has reported a
+    /// session: this console has nothing of its own to read back yet.
+    pub conversation_transcript: Reading<Option<probe::TranscriptRead>>,
     /// The named session's own transcript inside the container, read from its tail: the run's own
     /// words, and the primary evidence for the checkpoint it stopped at. `None` when no session is
     /// named -- nothing to read, and nothing to attribute.
@@ -355,6 +405,10 @@ pub const P_RETRIEVAL_JOURNAL: &str = "retrieval_journal";
 pub const P_FILES: &str = "files";
 pub const P_PIPELINE: &str = "pipeline";
 pub const P_CONVERSIONS: &str = "conversions";
+/// The Azathoth scorecard artifact the red-team corpus is scored into. A file read with a source
+/// and an age, like the conversion record: the scorecard is written by
+/// `scripts/redteam_scorecard.py`, and the console only ever reads it.
+pub const P_SCORECARDS: &str = "scorecards";
 pub const P_GRANTS: &str = "grants";
 /// The expensive one: it asks the running gate server for its own gate list, which means spawning
 /// `python3` inside the container and importing `fastmcp`.
@@ -364,6 +418,10 @@ pub const P_PORT_SELF_TEST_RECORD: &str = "port_self_test_record";
 pub const P_EVIDENCE_FILES: &str = "evidence_files";
 pub const P_EVIDENCE_TAILS: &str = "evidence_tails";
 pub const P_SESSION_TRANSCRIPT: &str = "session_transcript";
+/// The console's **own** conversation: the session the run it started reported, read back from that
+/// session's tail. Not the read above, which is the session the checkpoint card names out of
+/// evidence; this one is attributed to the id the run itself gave, and to nothing else.
+pub const P_CONVERSATION_TRANSCRIPT: &str = "conversation_transcript";
 pub const P_SESSIONS: &str = "sessions";
 
 /// The probe names, in the order `--probe-timings` prints them.
@@ -373,12 +431,14 @@ pub const PROBE_NAMES: &[&str] = &[
     P_PORTS,
     P_SESSIONS,
     P_SESSION_TRANSCRIPT,
+    P_CONVERSATION_TRANSCRIPT,
     P_GATE_JOURNAL,
     P_STORAGE_JOURNAL,
     P_RETRIEVAL_JOURNAL,
     P_FILES,
     P_PIPELINE,
     P_CONVERSIONS,
+    P_SCORECARDS,
     P_GRANTS,
     P_SELFTEST_RECORD,
     P_PORT_SELF_TEST_RECORD,
@@ -399,12 +459,15 @@ pub struct ProbeCache {
     pub ports: Cached<Vec<(u16, bool)>>,
     pub sessions: Cached<Vec<probe::SessionFile>>,
     pub session_transcript: Cached<Option<probe::TranscriptRead>>,
+    /// The console's own session's tail: what an item drawn LIVE is confirmed against.
+    pub conversation_transcript: Cached<Option<probe::TranscriptRead>>,
     pub gate_journal: Cached<(Vec<GateEntry>, usize)>,
     pub storage_journal: Cached<Vec<StoreEntry>>,
     pub retrieval_journal: Cached<Vec<RetrieveEntry>>,
     pub files: Cached<BTreeMap<String, FileMeta>>,
     pub pipeline: Cached<Pipeline>,
     pub conversions: Cached<Vec<ConversionRow>>,
+    pub scorecards: Cached<ScorecardReading>,
     pub grants: Cached<Grants>,
     pub selftest_record: Cached<Option<(Finding, SystemTime)>>,
     pub port_self_test_record: Cached<Option<(Finding, SystemTime)>>,
@@ -425,6 +488,10 @@ impl ProbeCache {
                 P_SESSION_TRANSCRIPT,
                 cache::ttl(cfg, P_SESSION_TRANSCRIPT),
             ),
+            conversation_transcript: Cached::new(
+                P_CONVERSATION_TRANSCRIPT,
+                cache::ttl(cfg, P_CONVERSATION_TRANSCRIPT),
+            ),
             gate_journal: Cached::new(P_GATE_JOURNAL, cache::ttl(cfg, P_GATE_JOURNAL)),
             storage_journal: Cached::new(P_STORAGE_JOURNAL, cache::ttl(cfg, P_STORAGE_JOURNAL)),
             retrieval_journal: Cached::new(
@@ -434,6 +501,7 @@ impl ProbeCache {
             files: Cached::new(P_FILES, cache::ttl(cfg, P_FILES)),
             pipeline: Cached::new(P_PIPELINE, cache::ttl(cfg, P_PIPELINE)),
             conversions: Cached::new(P_CONVERSIONS, cache::ttl(cfg, P_CONVERSIONS)),
+            scorecards: Cached::new(P_SCORECARDS, cache::ttl(cfg, P_SCORECARDS)),
             grants: Cached::new(P_GRANTS, cache::ttl(cfg, P_GRANTS)),
             selftest_record: Cached::new(P_SELFTEST_RECORD, cache::ttl(cfg, P_SELFTEST_RECORD)),
             port_self_test_record: Cached::new(
@@ -454,12 +522,14 @@ impl ProbeCache {
             self.ports.timing(),
             self.sessions.timing(),
             self.session_transcript.timing(),
+            self.conversation_transcript.timing(),
             self.gate_journal.timing(),
             self.storage_journal.timing(),
             self.retrieval_journal.timing(),
             self.files.timing(),
             self.pipeline.timing(),
             self.conversions.timing(),
+            self.scorecards.timing(),
             self.grants.timing(),
             self.selftest_record.timing(),
             self.port_self_test_record.timing(),
@@ -530,6 +600,16 @@ impl Probes {
                 "not probed",
             ),
             conversions: Reading::failed(Vec::new(), "step classification", at, "not probed"),
+            scorecards: Reading::failed(
+                ScorecardReading {
+                    rows: Vec::new(),
+                    winner: String::new(),
+                    axes: String::new(),
+                },
+                "console.evidence_dir/scorecards",
+                at,
+                "not probed: no scorecard artifact was read",
+            ),
             grants: Reading::failed(Grants::default(), "grant map", at, "not probed"),
             gate_allowlist: Reading::failed(Vec::new(), "gate server list_gates", at, "not probed"),
             selftest_finding: Reading::failed(None, "selftest record search", at, "not probed"),
@@ -559,6 +639,18 @@ impl Probes {
                 ),
                 at,
                 "not probed: no session transcript was read, so this run's own words are not here",
+            ),
+            // The console's own session, which `Probes::empty` cannot know here. It can still say what
+            // it did not do, which is what this error is for: nothing was read, so nothing this console
+            // drew can be confirmed against it.
+            conversation_transcript: Reading::failed(
+                None,
+                format!(
+                    "console.session_dir ({}) in {}",
+                    cfg.console.session_dir, cfg.console.container
+                ),
+                at,
+                "not probed: the console's own session record was not read",
             ),
             sessions: Reading::failed(
                 Vec::new(),
@@ -697,9 +789,14 @@ impl Snapshot {
     /// collect that is not forced re-reads only the probes whose cadence has elapsed, and the answers
     /// it reuses keep the instant they were read, so the age on the screen is the age of the reading
     /// and not the age of the collect.
-    pub fn collect_cached(cfg: &Config, cache: &mut ProbeCache, forced: bool) -> Snapshot {
+    pub fn collect_cached(
+        cfg: &Config,
+        cache: &mut ProbeCache,
+        forced: bool,
+        conversation: Option<&str>,
+    ) -> Snapshot {
         let at = probe::now();
-        let probes = collect_probes_with(cfg, at, cache, forced);
+        let probes = collect_probes_with(cfg, at, cache, forced, conversation);
         Snapshot::from_parts(cfg.clone(), probes)
     }
 
@@ -750,7 +847,7 @@ impl Snapshot {
 /// list has to be handed in.
 pub fn collect_probes(cfg: &Config, at: SystemTime) -> Probes {
     let mut cache = ProbeCache::new(cfg);
-    collect_probes_with(cfg, at, &mut cache, true)
+    collect_probes_with(cfg, at, &mut cache, true, None)
 }
 
 /// Run the probes through a cache: the worker's path.
@@ -759,11 +856,16 @@ pub fn collect_probes(cfg: &Config, at: SystemTime) -> Probes {
 /// really read -- and only the probes whose cadence has elapsed run a command or open a file. The
 /// expensive one, the gate server's own `list_gates`, is therefore asked on its own slow clock while
 /// the file stats and the process table are re-read every collect.
+///
+/// `conversation` is the session id the console's own turn reported, when it has reported one. It is
+/// handed in rather than discovered here: the console adopts that id from the run's own `init`
+/// envelope, and the worker is the only place the container may be read from.
 pub fn collect_probes_with(
     cfg: &Config,
     at: SystemTime,
     cache: &mut ProbeCache,
     forced: bool,
+    conversation: Option<&str>,
 ) -> Probes {
     let console = &cfg.console;
     let container = console.container.clone();
@@ -817,6 +919,16 @@ pub fn collect_probes_with(
         at,
         || read_conversions(cfg, at),
     );
+    // The scorecard is not a governed path from `artifacts`: it is written by
+    // `scripts/redteam_scorecard.py` into the console's own evidence directory, so it is read where
+    // the config says the evidence lives and the panel names that path.
+    let scorecard_path = scorecard_artifact_path(cfg);
+    let scorecards =
+        cache
+            .scorecards
+            .get(&scorecard_path.display().to_string(), forced, at, || {
+                read_scorecards(&scorecard_path, at)
+            });
     let grants = cache
         .grants
         .get(&artifact_key(cfg, "grant_map_json"), forced, at, || {
@@ -847,6 +959,39 @@ pub fn collect_probes_with(
         probe::container_sessions(&container, &console.session_dir, at)
     });
 
+    // The console's own conversation: the session a run it started reported, read from that session's
+    // own tail. While no run has reported one this is a failure that says exactly that, because "this
+    // console has no session of its own yet" is a different statement from "the read returned
+    // nothing", and only one of them is true.
+    let conversation_transcript = match conversation {
+        Some(id) => {
+            let path = format!("{}/{id}.jsonl", console.session_dir.trim_end_matches('/'));
+            let key = format!("{container}:{id}:{path}");
+            cache.conversation_transcript.get(&key, forced, at, || {
+                probe::container_transcript(
+                    &container,
+                    id,
+                    &path,
+                    probe::TRANSCRIPT_TAIL_BYTES,
+                    at,
+                )
+            })
+        }
+        None => cache.conversation_transcript.get(
+            &format!("{container}:(no session has been reported)"),
+            forced,
+            at,
+            || {
+                Reading::failed(
+                    None,
+                    format!("{container}:{}", console.session_dir),
+                    at,
+                    "no run has reported a session id, so this console has no transcript of its own to read back",
+                )
+            },
+        ),
+    };
+
     let mut probes = Probes {
         at,
         docker_ps,
@@ -859,6 +1004,7 @@ pub fn collect_probes_with(
         files,
         pipeline,
         conversions,
+        scorecards,
         grants,
         gate_allowlist,
         selftest_finding,
@@ -881,6 +1027,7 @@ pub fn collect_probes_with(
             at,
             "no session transcript was read: the session had not been resolved yet",
         ),
+        conversation_transcript,
         sessions,
     };
     // The session the card will name, and that one session's own words: the read that has to come
@@ -1093,6 +1240,133 @@ fn read_conversions(cfg: &Config, at: SystemTime) -> Reading<Vec<ConversionRow>>
             at,
         ),
         Err(error) => Reading::failed(Vec::new(), path.display().to_string(), at, error),
+    }
+}
+
+/// The scorecard artifact's path: the console's own evidence directory, under `scorecards/`.
+///
+/// The driver writes it there and the console only reads it, so the path is derived from the
+/// `console.evidence_dir` seam rather than added as a second path in the config.
+pub fn scorecard_artifact_path(cfg: &Config) -> PathBuf {
+    cfg.console
+        .evidence_dir
+        .join("scorecards")
+        .join("redteam-scorecard.json")
+}
+
+/// Parse the Azathoth scorecard artifact: the ranked revisions, the winner, and the artifact's own
+/// sentence about which axes carry no measurement.
+///
+/// Every value is read from the artifact and none is inferred. A ranking entry missing a field, a
+/// file that is not a scorecard, and a scorecard carrying no axes clause are all refusals with a
+/// reason: a panel that showed a score without the clause saying what it does not measure would be
+/// presenting an unmeasured axis as a measured one.
+pub fn parse_scorecards(text: &str) -> Result<ScorecardReading, String> {
+    let root: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+
+    let artifact = root
+        .get("artifact")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if artifact != "redteam-scorecard" {
+        return Err(format!(
+            "not a redteam-scorecard artifact (artifact = {artifact:?})"
+        ));
+    }
+
+    let axes = root
+        .get("axes_clause")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "the artifact carries no `axes_clause`, so which axes carry no measurement cannot be \
+             said"
+                .to_string()
+        })?
+        .to_string();
+
+    let winner = root
+        .get("winner")
+        .and_then(Value::as_str)
+        .unwrap_or("the artifact names no winner")
+        .to_string();
+
+    let ranking = root
+        .get("ranking")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the artifact carries no `ranking` array".to_string())?;
+
+    let mut rows = Vec::new();
+
+    for entry in ranking {
+        let revision = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a ranking entry carries no `name`".to_string())?;
+        let rank = entry
+            .get("rank")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("the ranking entry for {revision:?} carries no `rank`"))?;
+        let candidate = root.get("candidates").and_then(|map| map.get(revision));
+        let cases = match candidate {
+            Some(candidate) => format!(
+                "{}/{}",
+                candidate
+                    .get("cases_passed")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                candidate
+                    .get("cases_run")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            ),
+            None => "no case count recorded".to_string(),
+        };
+        rows.push(ScorecardRow {
+            rank: u32::try_from(rank).unwrap_or(u32::MAX),
+            revision: revision.to_string(),
+            overall: score_text(entry.get("overall_score")),
+            quality: score_text(entry.get("quality_score")),
+            cases,
+        });
+    }
+
+    if rows.is_empty() {
+        return Err("the artifact ranks no revision".to_string());
+    }
+
+    Ok(ScorecardReading { rows, winner, axes })
+}
+
+/// A normalized score as the artifact printed it, or `n/a` when it carries none.
+fn score_text(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_f64)
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn read_scorecards(path: &Path, at: SystemTime) -> Reading<ScorecardReading> {
+    let empty = ScorecardReading {
+        rows: Vec::new(),
+        winner: String::new(),
+        axes: String::new(),
+    };
+    if !path.is_file() {
+        // Dark, not broken: no driver run has written a scorecard yet, and the reason says so.
+        return Reading::failed(
+            empty,
+            path.display().to_string(),
+            at,
+            "no scorecard has been written yet (run scripts/redteam_scorecard.py)",
+        );
+    }
+    match probe::read_text(path, 512 * 1024) {
+        Ok(text) => match parse_scorecards(&text) {
+            Ok(reading) => Reading::ok(reading, path.display().to_string(), at),
+            Err(error) => Reading::failed(empty, path.display().to_string(), at, error),
+        },
+        Err(error) => Reading::failed(empty, path.display().to_string(), at, error),
     }
 }
 
@@ -1962,6 +2236,7 @@ fn build_live(cfg: &Config, probes: &Probes) -> LiveView {
         checkpoint,
         port_line,
         session_transcript_lines,
+        conversation_transcript: probes.conversation_transcript.clone(),
     }
 }
 
@@ -2069,12 +2344,37 @@ fn build_checks(cfg: &Config, probes: &Probes) -> Vec<CheckRow> {
 
 // --- INSPECT -----------------------------------------------------------------------------------
 
+/// The `console.*` keys the seam table renders with formatting of their own, so the seam loop skips
+/// them: several are recorded in `port.seams` as well, and rendering them in both places listed every
+/// one of them twice.
+///
+/// Every key an ancestor's `review` records belongs in this list. A recorded key that is never
+/// rendered is invisible on the one screen a reviewer checks -- which is how `claude_flags` and
+/// `checkpoint_fresh_minutes` went unreported while the config held their values.
+const CONSOLE_SEAM_ROWS: [&str; 10] = [
+    "container",
+    "claude_command",
+    "claude_flags",
+    "ports",
+    "evidence_dir",
+    "briefs_dir",
+    "session_dir",
+    "checkpoint_fresh_minutes",
+    "ci_jobs",
+    "orchestration_steps",
+];
+
 fn build_inspect(cfg: &Config, probes: &Probes) -> InspectView {
     let mut seams: Vec<SeamRow> = cfg
-        .komun_defaults()
+        .recorded_seams()
         .into_iter()
+        .filter(|(key, _)| {
+            !key.strip_prefix("console.")
+                .map(|short| CONSOLE_SEAM_ROWS.contains(&short))
+                .unwrap_or(false)
+        })
         .map(|(key, recorded)| SeamRow {
-            class: if cfg.at_komun_default(&key) {
+            class: if cfg.inherited(&key) {
                 SeamClass::RepoSpecific
             } else {
                 SeamClass::Generic
@@ -2083,20 +2383,12 @@ fn build_inspect(cfg: &Config, probes: &Probes) -> InspectView {
             key,
         })
         .collect();
-    for key in [
-        "console.container",
-        "console.claude_command",
-        "console.ports",
-        "console.evidence_dir",
-        "console.briefs_dir",
-        "console.session_dir",
-        "console.ci_jobs",
-        "console.orchestration_steps",
-    ] {
-        let short = key.trim_start_matches("console.");
+    for short in CONSOLE_SEAM_ROWS {
+        let key = format!("console.{short}");
         let value = match short {
             "container" => cfg.console.container.clone(),
             "claude_command" => cfg.console.claude_command.clone(),
+            "claude_flags" => cfg.console.claude_flags.join(" "),
             "ports" => format!(
                 "gate {} storage {} retrieval {}",
                 cfg.console.gate_port, cfg.console.storage_port, cfg.console.retrieval_port
@@ -2107,14 +2399,15 @@ fn build_inspect(cfg: &Config, probes: &Probes) -> InspectView {
                 "{} (window {}s)",
                 cfg.console.session_dir, cfg.console.session_window_seconds
             ),
+            "checkpoint_fresh_minutes" => format!("{} min", cfg.console.checkpoint_fresh_minutes),
             "ci_jobs" => format!("{} jobs", cfg.console.ci_jobs.len()),
             "orchestration_steps" => format!("{} steps", cfg.console.orchestration_steps.len()),
             _ => String::new(),
         };
         seams.push(SeamRow {
-            key: key.to_string(),
+            key,
             value,
-            class: if cfg.console_at_default(short) {
+            class: if cfg.console_inherited(short) {
                 SeamClass::RepoSpecific
             } else {
                 SeamClass::Generic
@@ -2240,6 +2533,12 @@ fn build_inspect(cfg: &Config, probes: &Probes) -> InspectView {
         conversions: probes.conversions.value.clone(),
         conversion_source: probes.conversions.source.clone(),
         conversion_age: iso::age_text(probes.conversions.at, probes.at),
+        scorecards: probes.scorecards.value.rows.clone(),
+        scorecard_source: probes.scorecards.source.clone(),
+        scorecard_age: iso::age_text(probes.scorecards.at, probes.at),
+        scorecard_winner: probes.scorecards.value.winner.clone(),
+        scorecard_axes: probes.scorecards.value.axes.clone(),
+        scorecard_note: probes.scorecards.error.clone(),
         adrs,
     }
 }
@@ -2259,4 +2558,86 @@ fn adr_directory(cfg: &Config) -> PathBuf {
         }
     }
     cfg.repo.join("docs/adr")
+}
+
+#[cfg(test)]
+mod scorecard_tests {
+    use super::*;
+
+    fn artifact(ranking: &str, candidates: &str, axes: &str) -> String {
+        format!(
+            r#"{{"artifact": "redteam-scorecard", "axes_clause": {axes}, "winner": "final run",
+                "ranking": {ranking}, "candidates": {candidates}}}"#
+        )
+    }
+
+    const TWO_REVISIONS: &str = r#"[{"rank": 1, "name": "final run", "overall_score": 1.0,
+        "quality_score": 1.0}, {"rank": 2, "name": "first run", "overall_score": 0.95,
+        "quality_score": 0.8}]"#;
+
+    const CASE_COUNTS: &str = r#"{"final run": {"cases_passed": 10, "cases_run": 10},
+        "first run": {"cases_passed": 8, "cases_run": 10}}"#;
+
+    #[test]
+    fn a_scorecard_is_read_with_its_own_axes_clause() {
+        let clause = "quality carries the evidence; latency, cost and reliability do not";
+        let text = artifact(TWO_REVISIONS, CASE_COUNTS, &format!("\"{clause}\""));
+        let reading = parse_scorecards(&text).expect("the artifact parses");
+
+        assert_eq!(reading.rows.len(), 2, "both ranked revisions are read");
+        assert_eq!(reading.rows[0].rank, 1);
+        assert_eq!(reading.rows[0].revision, "final run");
+        assert_eq!(reading.rows[0].quality, "1.000");
+        assert_eq!(reading.rows[0].cases, "10/10");
+        assert_eq!(reading.rows[1].cases, "8/10");
+        assert_eq!(reading.winner, "final run");
+        assert_eq!(
+            reading.axes, clause,
+            "the axes clause is the artifact's own sentence, carried verbatim"
+        );
+    }
+
+    #[test]
+    fn a_scorecard_without_its_axes_clause_is_refused() {
+        let text = artifact(TWO_REVISIONS, CASE_COUNTS, "null");
+        let error = parse_scorecards(&text).expect_err("a score without its clause is refused");
+
+        assert!(
+            error.contains("axes_clause"),
+            "the refusal names what is missing: {error}"
+        );
+    }
+
+    #[test]
+    fn another_artifact_is_not_read_as_a_scorecard() {
+        let text = r#"{"artifact": "something-else", "ranking": []}"#;
+        let error = parse_scorecards(text).expect_err("this is not a scorecard");
+
+        assert!(
+            error.contains("not a redteam-scorecard artifact"),
+            "the refusal says which artifact it read: {error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_ranking_is_refused_rather_than_shown_as_no_revisions() {
+        let text = artifact("[]", "{}", "\"a clause\"");
+        let error = parse_scorecards(&text).expect_err("an empty ranking is a refusal");
+
+        assert!(
+            error.contains("ranks no revision"),
+            "the refusal says the ranking is empty: {error}"
+        );
+    }
+
+    #[test]
+    fn a_revision_with_no_case_count_says_so_instead_of_printing_a_zero() {
+        let text = artifact(TWO_REVISIONS, "{}", "\"a clause\"");
+        let reading = parse_scorecards(&text).expect("the artifact parses");
+
+        assert_eq!(
+            reading.rows[0].cases, "no case count recorded",
+            "an absent count is named, never rendered as 0/0"
+        );
+    }
 }

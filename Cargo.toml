@@ -2,7 +2,7 @@
 name = "agentic-console"
 version = "0.1.0"
 edition = "2021"
-description = "A terminal window onto a repository's agentic quality-gate artifacts. Read-only by construction."
+description = "A terminal window onto a repository's agentic quality-gate artifacts, and the surface one conversation with the agent is driven from. Read-only toward the repository, by construction."
 license = "MIT"
 
 # Its own workspace root, deliberately. The kit's Cargo.toml lists its three members explicitly and

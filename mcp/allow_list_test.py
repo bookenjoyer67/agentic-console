@@ -60,7 +60,7 @@ FAIL_LOUD_RETRIEVAL_PORT = int(os.getenv("ALLOW_LIST_TEST_FAIL_LOUD_PORT2", "810
 CONTROL_ROUTING_MAP = Path("/tmp/allow-list-test-routing-map.json")
 CONTROL_AUDIT = Path("/tmp/allow-list-test-retrieval-audit.log")
 
-PROJECT = "proj-komun"
+PROJECT = "proj-console"
 CONFIDENTIAL_DOC = "finance-hosting-costs.md"
 COST_QUERY = (
     "What does hosting Komun cost per month, and what does the vendor contract commit us to?"

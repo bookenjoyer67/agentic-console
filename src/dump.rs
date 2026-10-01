@@ -1,6 +1,7 @@
 //! `--dump`: the whole reading as plain text, so the data layer can be checked in a pipe.
 
 use crate::config::Config;
+use crate::conversation::Conversation;
 use crate::iso;
 use crate::state::Snapshot;
 
@@ -81,6 +82,32 @@ pub fn render(config: &Config, snapshot: &Snapshot) -> String {
     out.push_str("\n== ACTIONS (commands this console would run; see --dry-run-actions) ==\n");
     out.push_str(&crate::actions::dry_run_all(config));
     out
+}
+
+/// Render the console's own transcript as plain text.
+///
+/// This section is unlike every other one here: the rest of `--dump` is a reading of the repository,
+/// and this is the buffer the console owns. `--dump` has not sent a turn and has no session, so it
+/// prints that buffer empty and says so in the buffer's own words -- an empty transcript has to look
+/// empty rather than look like a conversation that was not captured.
+pub fn render_conversation(out: &mut String, conversation: &Conversation) {
+    out.push_str("\n== TRANSCRIPT (this console's own buffer, not a reading) ==\n");
+    out.push_str(&format!("  {}\n", conversation.header_line()));
+    if conversation.items.is_empty() {
+        out.push_str(
+            "  no turn has been sent from this console: --dump reads the repository and exits.\n",
+        );
+        out.push_str(
+            "  an item is LIVE until its uuid is found in the session's own transcript, then CONFIRMED.\n",
+        );
+    } else {
+        for item in &conversation.items {
+            out.push_str(&format!(
+                "  [{:?}/{:?}] {}\n",
+                item.kind, item.state, item.text
+            ));
+        }
+    }
 }
 
 fn render_flow(out: &mut String, snapshot: &Snapshot) {
@@ -358,6 +385,25 @@ fn render_inspect(out: &mut String, snapshot: &Snapshot) {
             row.step, row.status, row.next_review
         ));
         out.push_str(&format!("        {}\n", row.source));
+    }
+    out.push_str(&format!(
+        "\n  scorecard -- source {} ({})\n",
+        inspect.scorecard_source, inspect.scorecard_age
+    ));
+    if let Some(note) = &inspect.scorecard_note {
+        out.push_str(&format!("    {}\n", note));
+    }
+    for row in &inspect.scorecards {
+        out.push_str(&format!(
+            "    #{} {:<12} overall {:<7} quality {:<7} cases {}\n",
+            row.rank, row.revision, row.overall, row.quality, row.cases
+        ));
+    }
+    if !inspect.scorecard_winner.is_empty() {
+        out.push_str(&format!("    winner: {}\n", inspect.scorecard_winner));
+    }
+    if !inspect.scorecard_axes.is_empty() {
+        out.push_str(&format!("    {}\n", inspect.scorecard_axes));
     }
     out.push_str("\n  ADRs:\n");
     for adr in &inspect.adrs {

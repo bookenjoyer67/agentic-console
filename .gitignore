@@ -12,3 +12,7 @@
 # Python bytecode: the pipeline's modules are run from source, never from a cached compile.
 __pycache__/
 *.pyc
+
+# The interpreter the scorecard driver runs under, built from requirements-scorecard.txt. It is a
+# local install, never committed: the pin in that file is what makes it reproducible.
+.venv/

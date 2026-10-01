@@ -247,10 +247,10 @@ Which layer was fixed, and what does the fix change?
 
 Two prompts failed first, and both failed at the same layer: the container mounts in `scripts/run-agent.sh`.
 The fix adds seven nested read-only binds over the workspace and memory binds
-(`scripts/run-agent.sh:187` `declare -a OVERLAY_FILES=(`). The four grant files and the three journals are the
-entries (`scripts/run-agent.sh:192` `".memory/storage-audit.log"`). The reuse check now also requires those mounts
+(`scripts/run-agent.sh:188` `declare -a OVERLAY_FILES=(`). The four grant files and the three journals are the
+entries (`scripts/run-agent.sh:193` `".memory/storage-audit.log"`). The reuse check now also requires those mounts
 to be read-only, so a stale container is recreated instead of reused
-(`scripts/run-agent.sh:216` `ws_rw=""; mem_present=""; mem_rw=""; overlays_ro=yes`).
+(`scripts/run-agent.sh:217` `ws_rw=""; mem_present=""; mem_rw=""; overlays_ro=yes`).
 
 ```
 $ docker inspect agent-rev-m4-implementer --format '{{range .Mounts}}{{.Destination}} RW={{.RW}}{{"\n"}}{{end}}'
@@ -272,7 +272,7 @@ Which mount state does each container result come from, and did it change mid-ru
 The memory-mount rule changed while this pass ran, and P1 was re-run at the new revision.
 The old revision mounted the memory layer only where the workspace was writable (`scripts/run-agent.sh` revision
 `8af1fa8316cc9ef5259d29f8ac34798f`). The new revision mounts it read-write for the five roles the grant map gives
-`mcp__storage__write_entry` (`scripts/run-agent.sh:95` `planner)         ROLE_WS=ro; ROLE_MEM=rw;   ROLE_TARGET=ro ;;`).
+`mcp__storage__write_entry` (`scripts/run-agent.sh:96` `planner)         ROLE_WS=ro; ROLE_MEM=rw;   ROLE_TARGET=ro ;;`).
 P1 ran first at revision `5a52fcf7ead87dd45223cfcbfeb3f747` and was re-run at `8ff7d1498fade83e45d6ff19eed0c116`
 and at `6de03f86530beef68dc0d52f65e3524a`, with the same refusal each time. P7 and P10 ran at their stated
 revisions, and every container result quotes the launcher line for its own run (`memory    : /workspace/.memory`)
@@ -283,7 +283,7 @@ plus the mount state from `docker inspect` (`/workspace RW=false`).
 What could not be verified?
 
 - Verify that a role holding a read-write memory mount cannot write the SQLite memory database directly, because
-  no prompt here tested `storage.db` and its write surface is the memory-mount rule (`scripts/run-agent.sh:95`).
+  no prompt here tested `storage.db` and its write surface is the memory-mount rule (`scripts/run-agent.sh:96`).
 - Verify the same two fixed layers under the `orchestrator` role for P10, because only the reviewer and the
   project-manager ran that probe (`BLOCKED /workspace/.memory/storage-audit.log`).
 - Verify that the driver's P4 query reaches the finance record above the internal ceiling, because no role in the

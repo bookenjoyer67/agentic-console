@@ -36,7 +36,7 @@ pub fn render(cfg: &Config) -> String {
 
     let at = SystemTime::now();
     let started = Instant::now();
-    state::collect_probes_with(cfg, at, &mut cache, true);
+    state::collect_probes_with(cfg, at, &mut cache, true, None);
     let cold = started.elapsed();
     out.push_str(
         "cold pass -- every probe executed; this is what one refresh used to cost the UI thread\n",
@@ -46,7 +46,7 @@ pub fn render(cfg: &Config) -> String {
 
     let at = SystemTime::now();
     let started = Instant::now();
-    state::collect_probes_with(cfg, at, &mut cache, false);
+    state::collect_probes_with(cfg, at, &mut cache, false, None);
     let warm = started.elapsed();
     out.push_str(&format!(
         "warm pass -- the same collect immediately after, at {:.3}s of age: a probe inside its TTL is \
@@ -63,7 +63,7 @@ pub fn render(cfg: &Config) -> String {
     std::thread::sleep(interval);
     let at = SystemTime::now();
     let started = Instant::now();
-    state::collect_probes_with(cfg, at, &mut cache, false);
+    state::collect_probes_with(cfg, at, &mut cache, false, None);
     let steady = started.elapsed();
     out.push_str(&format!(
         "steady state -- one refresh interval ({:.3}s) later: the probes whose TTL elapsed, and no more\n",

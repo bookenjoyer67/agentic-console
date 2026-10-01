@@ -78,7 +78,7 @@ EXPECTED_SUMMARY_GATES = {"fmt"}
 TEST_BASELINE_PASSED = 159
 BASELINE_REJECT_RECORD = {"passed": 158, "failed": 1}
 BASELINE_ACCEPT_RECORD = {"passed": 159, "failed": 0}
-GUARD_MARKER = "Checking komun-server"
+GUARD_MARKER = "Checking agentic-console"
 INJECTION_TARGET = "/tmp/gate-selftest-pwned"
 INJECTION_TARGET_POLICY = "/tmp/gate-selftest-pwned-policy"
 INJECTION_TARGET_CONFORMANCE = "/tmp/gate-selftest-pwned-conformance"
@@ -444,7 +444,7 @@ async def run_selftest(url: str, audit_path: str) -> int:
         guard = clippy["guard"]
         check(
             "clippy_guard_applied",
-            guard["applied"] is True and guard["touched"] == "/workspace/crates/server/src/main.rs",
+            guard["applied"] is True and guard["touched"] == "/workspace/src/main.rs",
             f"applied={guard['applied']} touched={guard['touched']} marker='{guard['marker']}'",
         )
         check(
@@ -497,7 +497,7 @@ async def run_selftest(url: str, audit_path: str) -> int:
             and clippy["output_ansi_stripped"] is True,
             "no ESC byte in the returned fmt, clippy and test output; cargo runs with "
             "CARGO_TERM_COLOR=always in this image, so a status line arrives as "
-            "'\\x1b[1m\\x1b[92m    Checking\\x1b[0m komun-server' and the server must strip the "
+            "'\\x1b[1m\\x1b[92m    Checking\\x1b[0m agentic-console' and the server must strip the "
             "escapes before the guard or any caller-side grep can match it",
         )
         summarised = {result["gate"] for result in executed if result["summary"]["applied"]}

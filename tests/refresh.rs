@@ -23,7 +23,7 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 
-use agentic_console::app::{App, Tab};
+use agentic_console::app::{App, Screen};
 use agentic_console::cache::{self, Cached};
 use agentic_console::collector::Collector;
 use agentic_console::config::Config;
@@ -137,12 +137,12 @@ fn a_cached_answer_carries_the_time_it_was_read_not_the_time_it_was_served() {
     let config = detached_config();
     let mut cache = ProbeCache::new(&config);
     let first_at = SystemTime::now();
-    let first_probes = collect_probes_with(&config, first_at, &mut cache, false);
+    let first_probes = collect_probes_with(&config, first_at, &mut cache, false, None);
     let read_instant = first_probes.gate_allowlist.at;
 
     std::thread::sleep(Duration::from_millis(1200));
     let second_at = SystemTime::now();
-    let second_probes = collect_probes_with(&config, second_at, &mut cache, false);
+    let second_probes = collect_probes_with(&config, second_at, &mut cache, false, None);
 
     assert!(
         second_probes.at > first_probes.at,
@@ -163,7 +163,9 @@ fn a_cached_answer_carries_the_time_it_was_read_not_the_time_it_was_served() {
     );
     assert_eq!(
         cache.served_from_cache(),
-        17,
+        // 19, not 18: the probe population gained `scorecards`, and this invariant is about every
+        // probe in it being answered from memory, so the count moves with the population.
+        19,
         "every probe is inside its TTL and was served from memory: the second collect reads nothing"
     );
 }
@@ -240,8 +242,8 @@ fn ui_keeps_drawing_and_handling_keys_while_a_collect_is_in_flight() {
          {turns_while_in_flight} saw it in flight: the loop must not be waiting for a probe"
     );
     assert_eq!(
-        app.tab,
-        Tab::Live,
+        app.view,
+        Screen::Live,
         "the key was handled while the collect was in flight"
     );
     let latency = key_latency.expect("the key was delivered to the loop");
@@ -345,7 +347,7 @@ fn r_asks_for_a_collect_that_no_ttl_may_serve_from_cache() {
     let config = detached_config();
     let mut cache = ProbeCache::new(&config);
 
-    collect_probes_with(&config, SystemTime::now(), &mut cache, false);
+    collect_probes_with(&config, SystemTime::now(), &mut cache, false, None);
     let cold = cache.executions();
     assert!(
         cold.iter().all(|(_, executions)| *executions == 1),
@@ -354,7 +356,7 @@ fn r_asks_for_a_collect_that_no_ttl_may_serve_from_cache() {
     assert_eq!(cache.served_from_cache(), 0, "nothing was in the cache yet");
 
     // An ordinary collect, immediately after: every probe is inside its TTL, so nothing runs.
-    collect_probes_with(&config, SystemTime::now(), &mut cache, false);
+    collect_probes_with(&config, SystemTime::now(), &mut cache, false, None);
     let warm = cache.executions();
     assert!(
         warm.iter().all(|(_, executions)| *executions == 1),
@@ -362,7 +364,8 @@ fn r_asks_for_a_collect_that_no_ttl_may_serve_from_cache() {
     );
     assert_eq!(
         cache.served_from_cache(),
-        17,
+        // 19, not 18: `scorecards` joined the probe population (see the note above).
+        19,
         "every probe was answered from memory"
     );
 
@@ -372,7 +375,7 @@ fn r_asks_for_a_collect_that_no_ttl_may_serve_from_cache() {
         .at()
         .expect("the first collect read the gate list");
     std::thread::sleep(Duration::from_millis(10));
-    let snapshot = Snapshot::collect_cached(&config, &mut cache, true);
+    let snapshot = Snapshot::collect_cached(&config, &mut cache, true, None);
     let forced = cache.executions();
     assert!(
         forced.iter().all(|(_, executions)| *executions == 2),

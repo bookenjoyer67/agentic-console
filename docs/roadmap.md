@@ -18,6 +18,17 @@ case an operator actually has.
 | T1.8 | the size matrix: frame tests at 80x24, 86x38, 100x30, 120x40, 160x50 and 230x60 |
 | T1.9 | the RUN panel lists every process in flight, not only the first |
 
+**T1.8 landed, 2026-09-30**: the frame tests now render every screen at 80x24, 86x38, 100x30, 120x40,
+160x50 and 230x60, so the narrow terminals are exercised by a green suite. The other rows here are not part
+of that change and this note does not claim them.
+
+**T1.2 landed, 2026-09-30**: INSPECT has a row budget. The panel measures its own document with the renderer
+that draws it (a measurement render with a sentinel line, because ratatui's exact `Paragraph::line_count`
+sits behind the unstable `rendered-line-info` feature and this crate takes no unstable dependency), clamps
+the scroll to the last row so a past-the-end scroll cannot land on a blank panel, and puts the row position
+and the rows remaining below the window in its title. A row that does not fit is announced and stays
+reachable. The other rows here are not part of that change and this note does not claim them.
+
 T1.9 came out of an experiment that ran two orchestrated runs in one container. Attribution on the checkpoint
 card stayed correct — it named one session or refused — while the RUN panel showed one process and never
 mentioned the other. The card keeps only `prompt_chars`, so the prompt's own words are the new datum this task
@@ -28,6 +39,9 @@ a change is no longer a regression test.
 
 ## Phase 2 — the composer, one-shot
 
+**Landed, 2026-09-30.** The action menu's eighth action is the prompt: compose one message, see the exact
+argv it becomes (with the session id it will mint, or the one it will resume), confirm, send it once.
+
 A prompt surface for the orchestrator. Compose one message, see the exact argv it becomes, confirm it, send it
 once. The console already has the pieces — the argv builder, the confirmation, the action log — so this phase
 is a text field with a provenance rule, not a new subsystem.
@@ -37,6 +51,11 @@ follows the same rule the checkpoint card follows: it names who it is talking to
 cannot.
 
 ## Phase 3 — the conversation pane
+
+**Landed, 2026-09-30**, with one correction this section had wrong. The pane is not read through the probe
+layer: a turn is the console's own child, so the transcript is the console's own buffer — labelled as such,
+in memory — and what is *read* is the run's own session record, read back out of the container to confirm the
+lines whose identity is found there. FLOW, LIVE and INSPECT are demoted to opaque overlays in front of it.
 
 A pane that shows the run's own transcript, read through the same probe layer as every other reading, with
 `--resume` to continue it. This is where a console stops being a dashboard and becomes the place the work is

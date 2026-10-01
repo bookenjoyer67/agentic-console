@@ -1537,6 +1537,9 @@ pub fn detect(cfg: &Config, probes: &Probes) -> Card {
             session: session.clone(),
             checkpoint_conflict: conflict.clone(),
             evaluated: true,
+            // The card previews a ruling, which resumes a session the card itself read: it is not
+            // driving a conversation of its own, so its prompt target is empty and stays empty.
+            prompt: actions::PromptTarget::default(),
         },
     ) {
         Ok(command) => command.display(),

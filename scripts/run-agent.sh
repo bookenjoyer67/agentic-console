@@ -26,8 +26,9 @@ cfg() { local v=""; [ -f "$SCRIPT_DIR/agentic_config.py" ] && v="$(python3 "$SCR
 IMAGE="${IMAGE:-$(cfg containers.tools_image 'agent-sandbox:console-m1')}"
 BROKER="${BROKER:-$(cfg containers.broker.name 'console-broker')}"
 BROKER_PORT="${BROKER_PORT:-$(cfg containers.broker.port '4000')}"
-TARGET_VOL="${TARGET_VOL:-rev-cargo-target}"
+TARGET_VOL="${TARGET_VOL:-$(cfg containers.target_volume 'console-cargo-target')}"
 REGISTRY_VOL="${REGISTRY_VOL:-$(cfg containers.registry_volume 'console-cargo-registry')}"
+SEED_CONTAINER="${SEED_CONTAINER:-$(cfg containers.seed_container '')}"
 OPENCODE_JSON="$SCRIPT_DIR/../sandbox/opencode-sandbox.json"
 TMP="${TMPDIR:-/tmp}"
 VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"
@@ -141,7 +142,7 @@ case "$CMDLINE" in
     ;;
 esac
 
-NAME="${NAME:-agent-rev-m4-$ROLE}"
+NAME="${NAME:-$(cfg console.role_container_prefix 'agent-console-m4-')$ROLE}"
 EXTRA=("${@:3}")
 
 command -v docker >/dev/null || { printf 'docker is not on PATH\n' >&2; exit 1; }
@@ -248,8 +249,8 @@ if [ "${RECREATE:-no}" = yes ]; then
   docker network connect "$NET_BROKER" "$NAME"
   # Trust + model-entitlement cache, the same file sandbox/run-agent-m3.sh:50-54 copies, so a headless
   # run does not stall on onboarding. It carries no credentials.
-  if docker inspect agent-rev-m3 >/dev/null 2>&1; then
-    if docker exec -u 0 agent-rev-m3 cat /root/.claude.json > "$TMP/m4-claude-$ROLE.json" 2>/dev/null; then
+  if [ -n "$SEED_CONTAINER" ] && docker inspect "$SEED_CONTAINER" >/dev/null 2>&1; then
+    if docker exec -u 0 "$SEED_CONTAINER" cat /root/.claude.json > "$TMP/m4-claude-$ROLE.json" 2>/dev/null; then
       # Seed through an exec, not docker cp: the daemon's archive path refuses this container once a
       # read-only file overlay sits inside a read-only workspace, and aborts the launch under set -e
       # (measured: `Error response from daemon: openat workspace/docs/routing-and-tool-grant-map.json:
