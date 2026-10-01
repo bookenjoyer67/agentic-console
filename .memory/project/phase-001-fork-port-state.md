@@ -1,6 +1,6 @@
 # Phase 001 — what this fork has ported, and what it has not
 
-**Type:** phase · **Classification:** internal · **Recorded:** 2026-09-30 · **Review:** 2026-10-28
+**Type:** phase · **Classification:** internal · **Recorded:** 2026-09-30 · **Review:** 2026-10-28 · **Updated:** 2026-10-01
 
 ## The current phase
 
@@ -44,6 +44,23 @@ governance, which was not**.
    clone therefore registers no MCP server, and a run against it would leave no journal row at all.
 7. **`PORTING.md`.** Named four times — `agentic.config.json:10`, `scripts/agentic_config.py:59`,
    `scripts/run-agent.sh:12`, `docs/iteration-log.md:172` — and absent.
+
+## Closed since this record — 2026-10-01
+
+- **Item 1, the six role definitions.** Ported to this repository in `b01b3da`. Their `AGENTS.md:NNN`
+  citations now land inside this repository's own `AGENTS.md` (highest cited line 162 of a 177-line file,
+  against 166 as committed when this record was written), their `project_id` is `proj-console`, and the
+  commands whose argv needs a frontend this repository does not carry are documented as such
+  (`tester.md:7`, `tester.md:55`) rather than assumed.
+- **Item 2, the project-id split.** Closed with them: the grant map now carries this repository's id
+  (`docs/routing-and-tool-grant-map.json` `"project": "proj-console"`; `docs/routing-and-tool-grant-map.md`
+  lines 3 and 5), so the config, `CLAUDE.md`, the corpus, the role definitions and the grant map all
+  agree, as `decisions/decision-001-project-id.md` requires. `proj-komun` survives only in records —
+  the fork-proof table, the ancestry entry in `agentic.config.json`, the red-team corpus, the schema
+  examples and the decision record itself.
+- **The blind spot below, its first half.** `scripts/port-self-test.sh` now sweeps the role definitions
+  with the other wiring files (46 files), which is exactly what surfaced the 41 `proj-komun` seams in
+  `.claude/agents/*.md`. The conformance gate still does not resolve citations inside them.
 
 ## What is deliberately not open
 

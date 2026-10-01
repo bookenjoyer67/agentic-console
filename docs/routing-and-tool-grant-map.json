@@ -1,5 +1,5 @@
 {
-  "project": "proj-komun",
+  "project": "proj-console",
   "tool_identifier_form": "mcp__<server>__<tool>",
   "servers": [
     "coursetools",

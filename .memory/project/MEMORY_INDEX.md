@@ -10,7 +10,7 @@ adding a duplicate. An entry whose review date has passed is flagged to the huma
 ## Active entries
 
 - `decisions/decision-001-project-id.md` — this repository's project id is `proj-console`, in the config, the corpus and the storage calls; review 2026-12-29
-- `phase-001-fork-port-state.md` — what the fork has ported and what it has not, as of 2026-09-30; review 2026-10-28
+- `phase-001-fork-port-state.md` — what the fork has ported and what it has not, as of 2026-10-01; review 2026-10-28
 
 ## Archived entries
 

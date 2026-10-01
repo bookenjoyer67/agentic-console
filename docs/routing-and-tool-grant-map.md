@@ -1,8 +1,8 @@
 # Routing and Tool Grant Map
 
-Which roles run the pre-merge quality gate for `proj-komun`, and what does each one hold?
+Which roles run the pre-merge quality gate for `proj-console`, and what does each one hold?
 
-Project: `proj-komun`
+Project: `proj-console`
 
 Update an agent definition to match this map whenever the two disagree. This map is the design decision of record for the gate.
 
