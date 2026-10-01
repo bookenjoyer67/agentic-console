@@ -143,8 +143,8 @@ rm -f /tmp/sandbox-settings.json
 echo
 echo "workspace : $REPO  ->  /workspace"
 echo "container : $AGENT_NAME   (network $NET, no internet)"
-echo "claude    : docker exec -it $AGENT_NAME claude --model opus"
-echo "opencode  : docker exec -it $AGENT_NAME opencode run -m sandbox/deepseek-v4-flash \"...\""
+AM="$(cfg models.agent '')"; echo "claude    : docker exec -it $AGENT_NAME claude ${AM:+--model $AM}"
+echo "opencode  : docker exec -it $AGENT_NAME opencode run -m sandbox/$(cfg models.sandbox_cli 'deepseek-v4-flash') \"...\""
 echo "shell     : docker exec -it $AGENT_NAME bash"
 echo "health    : docker exec $AGENT_NAME curl -s http://$BROKER_HOST:4000/health"
 echo "logs      : docker logs -f $BROKER_NAME"

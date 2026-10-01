@@ -19,6 +19,12 @@
 # RETRIEVAL_EMBEDDING_MODEL, RETRIEVAL_QUERY_PREFIX.
 set -euo pipefail
 
+# cfg <key> <current-value>: one value resolved by scripts/agentic_config.py, or <current-value> when
+# that loader or agentic.config.json is absent, so this launcher is unchanged without the kit. The
+# shape is copied from scripts/run-agent.sh so the two readers cannot disagree on a missing config.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg() { local v=""; [ -f "$SCRIPT_DIR/agentic_config.py" ] && v="$(python3 "$SCRIPT_DIR/agentic_config.py" --get "$1" --default "$2" 2>/dev/null || true)"; printf '%s' "${v:-$2}"; }
+
 WORKSPACE="${WORKSPACE:-/workspace}"
 MEMORY="${MEMORY:-$WORKSPACE/.memory}"
 HOST="${HOST:-0.0.0.0}"
@@ -63,8 +69,10 @@ STORAGE_PID=$!
 # floor=80.0`). The model this server falls back to on its own scores 5/8, below that harness's 80%
 # floor, so starting the repository the documented way now yields the documented result. Both values
 # stay overridable, and the model is selected through the server's own environment variables
-# (mcp/retrieval/server.py:74 `RETRIEVAL_EMBEDDING_MODEL`).
-export RETRIEVAL_EMBEDDING_MODEL="${RETRIEVAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}"
+# (mcp/retrieval/server.py:74 `RETRIEVAL_EMBEDDING_MODEL`). The value comes from the seam table
+# (`agentic.config.json` `"retrieval": "BAAI/bge-small-en-v1.5"`); an environment variable wins, and
+# this literal is the fallback a checkout with no config still gets.
+export RETRIEVAL_EMBEDDING_MODEL="${RETRIEVAL_EMBEDDING_MODEL:-$(cfg models.retrieval 'BAAI/bge-small-en-v1.5')}"
 export RETRIEVAL_QUERY_PREFIX="${RETRIEVAL_QUERY_PREFIX:-Represent this sentence for searching relevant passages: }"
 
 python3 "$RETRIEVAL_SERVER" \

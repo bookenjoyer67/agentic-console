@@ -86,3 +86,29 @@ A fork points the crate at its own repository and carries its own `console`, `co
 
 Nothing in this crate writes inside the repository. Every probe reads, and the only writes an action causes
 happen inside the container or in `briefs_dir`, both of which are outside the working tree.
+
+## `models`
+
+Which model does each consumer use, and where is that decided?
+
+| key | the value this repository ships | who reads it |
+| --- | --- | --- |
+| `models.agent` | `""` | the agent CLI; the console sends no `--model` flag, so the CLI resolves its own default |
+| `models.sandbox_cli` | `deepseek-v4-flash` | the opencode hint the sandbox launcher prints |
+| `models.retrieval` | `BAAI/bge-small-en-v1.5` | the retrieval server's `RETRIEVAL_EMBEDDING_MODEL` |
+
+The block is a top-level key in `agentic.config.json` (`agentic.config.json` `"retrieval":
+"BAAI/bge-small-en-v1.5"`), and each consumer reads it rather than holding its own copy. The retrieval
+launcher resolves the key through `scripts/agentic_config.py`, with the environment variable still
+winning and the literal fallback intact (`scripts/start-mcp-servers.sh:75` `$(cfg models.retrieval
+'BAAI/bge-small-en-v1.5')`). The sandbox launcher prints the configured model in its opencode hint
+(`sandbox/run-agent.sh:147` `opencode run -m sandbox/$(cfg models.sandbox_cli`).
+
+`scripts/new-project.py --propose` writes all three into the proposal manifest, and `--apply` plants
+them under `models` in the fork's config. The wizard takes `--agent-model`, `--sandbox-model` and
+`--retrieval-model` (`scripts/new-project.py` `--sandbox-model SANDBOX_MODEL`). Accepting those
+defaults records today's effective values and changes no behaviour.
+
+The block is deliberately not a `port.seam`: its values equal the ancestor's, and a seam whose value
+equals its ancestor's fails the fork check (`agentic.config.json` `"seams"`). A fork that edits one
+line here changes that model in every consumer.

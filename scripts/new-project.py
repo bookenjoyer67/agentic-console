@@ -47,6 +47,17 @@ HERE = Path(__file__).resolve().parent
 KIT_ROOT = HERE.parent
 MANIFEST_NAME = "agentic.project.json"
 
+# The model values this kit carries today, one per consumer. Accepting the wizard's defaults must
+# change nothing, so every default here equals the value already in force: the agent CLI resolves
+# its own model today, the sandbox's opencode declares `deepseek-v4-flash` in
+# sandbox/opencode-sandbox.json, and scripts/start-mcp-servers.sh exports BAAI/bge-small-en-v1.5.
+# This block is NOT a port.seam: a seam must differ from its ancestor's value, and these equal it.
+MODEL_DEFAULTS = {
+    "agent": "",
+    "sandbox_cli": "deepseek-v4-flash",
+    "retrieval": "BAAI/bge-small-en-v1.5",
+}
+
 # The paths that carry PROJECT IDENTITY, declared in `port.seams` and checked against every
 # ancestor's recorded value. This list is the seam table's own statement of what a fork must
 # change; it lives in the config so completeness is reviewable there, not in a script.
@@ -177,7 +188,7 @@ def detect(repo: Path) -> dict:
 
 def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, facts: dict,
                    ports: dict[str, int], extra_gates: dict[str, dict],
-                   console_container: str) -> dict:
+                   console_container: str, models: dict) -> dict:
     return {
         "schema_version": "1",
         "project": {
@@ -205,6 +216,7 @@ def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, fa
             "console_container": console_container,
         },
         "ports": ports,
+        "models": models,
         "artifacts": {
             "evidence_dir": f"~/{slug}-evidence",
             "briefs_dir": f"~/{slug}-evidence/briefs",
@@ -224,6 +236,14 @@ def apply_manifest(parent_cfg: dict, manifest: dict) -> tuple[dict, dict]:
     parent_review = {k: v for k, v in parent_review.items() if v is not None}
 
     p, rt, pr = manifest["project"], manifest["runtime"], manifest["ports"]
+
+    # 1b. the models this project runs, recorded beside the ports from the ONE manifest. The block is
+    #     not a seam (its values equal the ancestor's, so a seam would fail the fork check), and a
+    #     manifest written before this block carries none, so an absent block defaults to this kit's.
+    declared = manifest.get("models") or {}
+    if "models" not in manifest:
+        print("  note  the manifest predates the models block; writing this kit's values.")
+    plant(cfg, "models", {k: declared.get(k, v) for k, v in MODEL_DEFAULTS.items()})
 
     # 2. identity
     plant(cfg, "project.name", p["name"])
@@ -455,6 +475,9 @@ def show(manifest: dict, recorded: dict | None = None, heading: str = "") -> Non
           f"volume {rt['registry_volume']}")
     print(f"             console {rt['console_container']}")
     print(f"ports      : gate {pr['gate']}  storage {pr['storage']}  retrieval {pr['retrieval']}")
+    mod = manifest.get("models") or dict(MODEL_DEFAULTS)
+    print(f"models     : agent {mod['agent'] or '(the CLI resolves its own default)'}   "
+          f"sandbox {mod['sandbox_cli']}   retrieval {mod['retrieval']}")
     if recorded:
         print(f"\nport.ancestors gets the PARENT's {len(recorded)} values as its newest entry, so "
               f"the check works at any depth rather than one generation:")
@@ -474,7 +497,9 @@ def mode_propose(args, repo: Path, slug: str, parent_kit: Path, parent_cfg: dict
         extra[name] = {"says": f"the {name} gate passes", "argv": argv.split()}
 
     manifest = build_manifest(parent_cfg, parent_kit, slug, repo, facts, ports, extra,
-                              args.console_container or f"{slug}-console")
+                              args.console_container or f"{slug}-console",
+                              {"agent": args.agent_model, "sandbox_cli": args.sandbox_model,
+                               "retrieval": args.retrieval_model})
     show(manifest, heading="proposed manifest -- detected values; edit what detection cannot know:")
 
     target = repo / MANIFEST_NAME
@@ -569,6 +594,12 @@ def main() -> int:
                     help="gate,storage,retrieval MCP ports -- this project's own")
     ap.add_argument("--console-container", default=None,
                     help="the container that watches this project (default: <slug>-console)")
+    ap.add_argument("--agent-model", default=MODEL_DEFAULTS["agent"],
+                    help="the agent CLI's model; empty sends no model flag, so the CLI resolves it")
+    ap.add_argument("--sandbox-model", default=MODEL_DEFAULTS["sandbox_cli"],
+                    help="the model the sandbox's opencode declares in sandbox/opencode-sandbox.json")
+    ap.add_argument("--retrieval-model", default=MODEL_DEFAULTS["retrieval"],
+                    help="the embedding model scripts/start-mcp-servers.sh exports for retrieval")
     ap.add_argument("--gate", action="append", default=[], metavar="NAME=ARGV",
                     help="add a project-specific gate, e.g. --gate 'packaging=python3 scripts/x.py'")
     ap.add_argument("--write-env", action="store_true",

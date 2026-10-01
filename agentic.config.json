@@ -662,5 +662,10 @@
       "evidence_tails": 5,
       "gate_allowlist": 30
     }
+  },
+  "models": {
+    "agent": "",
+    "sandbox_cli": "deepseek-v4-flash",
+    "retrieval": "BAAI/bge-small-en-v1.5"
   }
 }
