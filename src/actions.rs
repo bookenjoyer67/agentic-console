@@ -361,6 +361,7 @@ fn gate_server(cfg: &Config) -> Result<String, String> {
 
 /// The argv the gate server's own selftest takes, from the config's ports and journal paths.
 pub fn gate_selftest_argv(cfg: &Config) -> Result<Vec<String>, String> {
+    require_console_key(cfg, "console.container")?;
     let server = gate_server(cfg)?;
     let workspace = cfg.workspace();
     let journal = cfg
@@ -400,6 +401,44 @@ pub fn gate_client_script(port: u16) -> String {
     )
 }
 
+/// The `console.*` keys an action's argv cannot be built without, in dotted form.
+///
+/// One list, so a required value is checked in one place and a missing one can never be papered over
+/// with a default. `console.container` is the container every `docker exec` action targets; the
+/// ruling also reads its session directory from it. `console.role_container_prefix` is what
+/// `scripts/run-agent.sh` builds a role box's name from. `console.briefs_dir` is where a brief is
+/// staged, and an empty one would write the brief into the working directory (the repository).
+fn required_console_keys(kind: ActionKind) -> &'static [&'static str] {
+    match kind {
+        ActionKind::RoleBox => &["console.role_container_prefix"],
+        ActionKind::Brief => &["console.container", "console.briefs_dir"],
+        ActionKind::GateSelftest | ActionKind::Gate | ActionKind::Ruling | ActionKind::Prompt => {
+            &["console.container"]
+        }
+        ActionKind::PortSelfTest | ActionKind::PolicySuites => &[],
+    }
+}
+
+/// The configured value behind a dotted console key, or `None` for a key this builder does not read.
+fn console_value<'a>(cfg: &'a Config, dotted: &str) -> Option<&'a str> {
+    match dotted {
+        "console.container" => Some(cfg.console.container.as_str()),
+        "console.role_container_prefix" => Some(cfg.console.role_container_prefix.as_str()),
+        "console.briefs_dir" => Some(cfg.console.briefs_dir_raw.as_str()),
+        _ => None,
+    }
+}
+
+/// Refuse when a required console value is empty, naming the key and the config in the one wording
+/// [`Config::config_refusal`] owns. This is the point of use the default must never substitute for.
+fn require_console_key(cfg: &Config, dotted: &str) -> Result<(), String> {
+    let held = console_value(cfg, dotted).unwrap_or_default();
+    if held.trim().is_empty() {
+        return Err(cfg.config_refusal(dotted));
+    }
+    Ok(())
+}
+
 /// Build the exact command for one action, or refuse with the reason.
 pub fn build(
     cfg: &Config,
@@ -408,6 +447,13 @@ pub fn build(
     guards: Guards,
 ) -> Result<Command, String> {
     let value = value.trim();
+    // A required value the config does not carry is a refusal, never a default: an empty container,
+    // role-box prefix or briefs directory would build an argv that names nothing -- or names the
+    // origin project's runtime. The preview/`--dry-run` path calls this same function, so it refuses
+    // the same way.
+    for key in required_console_keys(kind) {
+        require_console_key(cfg, key)?;
+    }
     match kind {
         ActionKind::PortSelfTest => {
             let launcher = launcher(cfg)?;
@@ -988,6 +1034,12 @@ pub fn dry_run_all(cfg: &Config) -> String {
     out.push_str("agentic-console --dry-run-actions\n");
     out.push_str(&format!("repo     : {}\n", cfg.repo.display()));
     out.push_str(&format!("config   : {}\n", cfg.source_line()));
+    if cfg.console.container.trim().is_empty() {
+        out.push_str(&format!(
+            "refusal  : {}\n",
+            cfg.config_refusal("console.container")
+        ));
+    }
     out.push_str(&format!(
         "container: {} (from console.container)\n",
         cfg.console.container

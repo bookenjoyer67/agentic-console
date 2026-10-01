@@ -1,9 +1,12 @@
 //! `agentic.config.json`, read from the repository the console is pointed at.
 //!
 //! The whole kit is meant to be forked, so nothing here is hardcoded to this repository: every value
-//! comes from the config file, and the console reports where each one came from. Absent is a
-//! supported state, exactly as `scripts/agentic_config.py` treats it: a missing or unreadable file
-//! yields the embedded Komun defaults and the UI says so on every screen.
+//! comes from the config file, and the console reports where each one came from. A file that cannot
+//! be read is a refusal, not a substitution: the screens still render from the embedded fallback, but
+//! an action that needs a value the config does not carry is refused at the point of use by
+//! [`Config::config_refusal`], which names the failed read or the empty key. No default here names
+//! another repository's container, role-box prefix or directory -- those are empty, and empty is
+//! refused rather than replaced.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -130,6 +133,10 @@ impl Default for Conversation {
 /// The `console` block: the runtime facts a console needs that the rest of the config does not carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Console {
+    /// The running sandbox container every `docker exec` action targets.
+    ///
+    /// Empty means "not configured": an action that needs it is refused with
+    /// [`Config::config_refusal`] rather than building an argv that names nothing.
     pub container: String,
     pub claude_command: String,
     pub gate_port: u16,
@@ -155,7 +162,11 @@ pub struct Console {
     /// are, the evidence cannot say which one the run stopped in, and the ruling is refused rather
     /// than aimed at the newest and possibly at somebody else's conversation.
     pub session_window_seconds: u64,
-    /// The container-name prefix `scripts/run-agent.sh` gives a role box (`agent-rev-m4-$ROLE`).
+    /// The container-name prefix `scripts/run-agent.sh` gives a role box, so a box's name is
+    /// `<prefix><role>`.
+    ///
+    /// Empty means "not configured": the role-box action is refused with
+    /// [`Config::config_refusal`] rather than launching a box whose name is only the role.
     pub role_container_prefix: String,
     /// How long a journal shape counts as fresh evidence of a checkpoint waiting on a human.
     pub checkpoint_fresh_minutes: u64,
@@ -166,10 +177,19 @@ pub struct Console {
 
 impl Default for Console {
     fn default() -> Self {
-        let evidence_raw = "~/komun-agent-exercise-4-3";
-        let briefs_raw = "~/komun-agent-exercise-4-3/briefs";
+        // An unset value is REFUSED at the point of use (`Config::config_refusal`), never silently
+        // replaced by a default. These four name a runtime -- a container, a role-box prefix and two
+        // host directories -- and a default that names the ORIGIN project's runtime is the recorded
+        // incident: when the config could not be read, the console fell back to these and drove a run
+        // into the origin project's container, leaving a second unrelated run in that tree. It was
+        // invisible because it looked like it worked. Empty therefore means "not configured": an
+        // action that needs one of these refuses and names the key instead of building an argv that
+        // names nothing. Only self-describing values (ports, timeouts, freshness bounds, the CLI's
+        // own name) keep an embedded default.
+        let evidence_raw = "";
+        let briefs_raw = "";
         Console {
-            container: "agent-rev-m3".to_string(),
+            container: String::new(),
             claude_command: "claude".to_string(),
             gate_port: 8003,
             storage_port: 8001,
@@ -219,7 +239,7 @@ impl Default for Console {
             conversation: Conversation::default(),
             session_dir: "/root/.claude/projects/-workspace".to_string(),
             session_window_seconds: 120,
-            role_container_prefix: "agent-rev-m4-".to_string(),
+            role_container_prefix: String::new(),
             checkpoint_fresh_minutes: 30,
             // The same six, with the same wording and the same checkpoint scoping, as
             // `console.rulings` in this repository's `agentic.config.json` and in
@@ -323,6 +343,14 @@ pub struct Config {
     pub root: Value,
     /// Whether `path` was read and parsed.
     pub from_file: bool,
+    /// The config file that was actually read, when one was.
+    ///
+    /// `None` is its own state -- **no config file was found** at [`Config::path`] -- and is the
+    /// state the refusal distinguishes from "a file was read but a required key is empty". A file
+    /// that was found but could not be parsed is neither: it is a failed read, and
+    /// [`Config::load_error`] carries the reason. This is the bookkeeping [`Config::container_overridden`]
+    /// does for the container override, one state richer.
+    pub config_read: Option<PathBuf>,
     /// The `console` block, resolved with defaults for anything it leaves out.
     pub console: Console,
     /// Whether the file carried a `console` block at all.
@@ -344,19 +372,31 @@ impl Config {
         };
         let read_at = SystemTime::now();
         let mut load_error = None;
+        let mut config_read = None;
         let (root, from_file) = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str::<Value>(&text) {
-                Ok(value) if value.is_object() => (value, true),
-                Ok(_) => {
-                    load_error = Some(format!("{path:?} is not a JSON object"));
-                    (embedded_defaults(), false)
+            Ok(text) => {
+                // The file is present and its bytes were read; whether it parses is a separate
+                // state, carried by `load_error` and `from_file`.
+                config_read = Some(path.clone());
+                match serde_json::from_str::<Value>(&text) {
+                    Ok(value) if value.is_object() => (value, true),
+                    Ok(_) => {
+                        load_error = Some(format!("{path:?} is not a JSON object"));
+                        (embedded_defaults(), false)
+                    }
+                    Err(error) => {
+                        load_error = Some(format!("{path:?} is not valid JSON: {error}"));
+                        (embedded_defaults(), false)
+                    }
                 }
-                Err(error) => {
-                    load_error = Some(format!("{path:?} is not valid JSON: {error}"));
-                    (embedded_defaults(), false)
-                }
-            },
+            }
             Err(error) => {
+                // A missing file is not a failed read of a present one, and `config_read` is what
+                // tells them apart. Anything else -- a directory, a permission -- is a file that is
+                // there but could not be read, so the path is recorded and the reason is kept.
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    config_read = Some(path.clone());
+                }
                 load_error = Some(format!("{path:?} could not be read: {error}"));
                 (embedded_defaults(), false)
             }
@@ -372,6 +412,7 @@ impl Config {
             path,
             root,
             from_file,
+            config_read,
             console,
             console_present,
             container_overridden: false,
@@ -659,14 +700,38 @@ impl Config {
         self.console.rulings.iter().find(|ruling| ruling.id == id)
     }
 
+    /// The ONE sentence for a required config value this console cannot act on.
+    ///
+    /// Single source of the wording, so the card, the status line, the action log and `--dump` all
+    /// refuse in the same words rather than each composing a sentence. It distinguishes the two
+    /// failures in plain language:
+    ///
+    /// * the config file itself was not found at the path that was looked in, so no key could have
+    ///   been read from it;
+    /// * the file was read and `dotted` is empty or absent in it.
+    ///
+    /// A file that was found but could not be parsed is the third state: that is a failed *read*,
+    /// and [`Config::load_error`] already carries the reason, which is the only sentence that names
+    /// what actually went wrong (invalid JSON, a directory, a permission). This extends the refusal
+    /// the console already gives for an unread file rather than inventing a second mechanism.
+    pub fn config_refusal(&self, dotted: &str) -> String {
+        if self.config_read.is_none() {
+            return format!("{CONFIG_FILENAME} was not found at {}", self.path.display());
+        }
+        if let Some(error) = &self.load_error {
+            return error.clone();
+        }
+        format!("{dotted} is empty in {}", self.path.display())
+    }
+
     /// A one-line description of where the config came from.
     pub fn source_line(&self) -> String {
         if self.from_file {
             format!("{} (read from file)", self.path.display())
         } else {
             match &self.load_error {
-                Some(error) => format!("embedded Komun defaults -- {error}"),
-                None => "embedded Komun defaults".to_string(),
+                Some(error) => format!("embedded defaults -- {error}"),
+                None => "embedded defaults".to_string(),
             }
         }
     }
@@ -1008,6 +1073,7 @@ mod tests {
             path: PathBuf::from("/repo/agentic.config.json"),
             root: json!({}),
             from_file: true,
+            config_read: Some(PathBuf::from("/repo/agentic.config.json")),
             console,
             console_present: true,
             container_overridden: false,

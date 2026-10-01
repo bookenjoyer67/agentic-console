@@ -18,6 +18,12 @@ pub fn render(config: &Config, snapshot: &Snapshot) -> String {
         iso::format_age(config.read_at, snapshot.read_at)
     ));
     out.push_str(&format!("container   : {}\n", config.console.container));
+    if config.console.container.trim().is_empty() {
+        out.push_str(&format!(
+            "refusal     : {}\n",
+            config.config_refusal("console.container")
+        ));
+    }
     out.push_str(&format!(
         "claude      : {}   workspace {}   gate port {} storage {} retrieval {}\n",
         config.console.claude_command,

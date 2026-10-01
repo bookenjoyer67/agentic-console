@@ -816,6 +816,15 @@ impl Snapshot {
                     .to_string(),
             );
         }
+        // A container the config does not name is the incident itself: a run would be driven into
+        // whatever tree a default pointed at. The warning is the same sentence every action refuses
+        // with, from the one function that owns the wording.
+        if config.console.container.trim().is_empty() {
+            warnings.push(format!(
+                "config: {}",
+                config.config_refusal("console.container")
+            ));
+        }
         for (name, reading) in [
             ("docker ps", &probes.docker_ps.error),
             ("container ps", &probes.container_ps.error),
