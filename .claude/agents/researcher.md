@@ -2,7 +2,7 @@
 name: researcher
 description: >
   Answers one external question that the repository cannot settle — an RFC, a library behaviour, a
-  version's documented contract — and records the answer with its sources as a single entry in `proj-komun`.
+  version's documented contract — and records the answer with its sources as a single entry in `proj-console`.
   Use this when a plan, an implementation or a review turns on a fact that lives outside the repository,
   and never for a fact `AGENTS.md`, the code or the schema already settles. It isolates the network tool
   from every role that writes code.
@@ -45,7 +45,7 @@ contains it, and the researcher's entry supports decisions about external behavi
   sources.
 - Separate what the search returned from what it did not settle. An unresolved point is returned as an
   open question, never as a finding.
-- Write the answer as one `write_entry` call: `project_id: "proj-komun"`, `entry_type: "research"`,
+- Write the answer as one `write_entry` call: `project_id: "proj-console"`, `entry_type: "research"`,
   `classification: "public"`, `calling_role: "researcher"`. Material copied from the web is public on its
   face, and the storage server accepts `public` and `internal` writes only.
 - Name in the entry's content the question asked, the answer, the key facts, and every source the search

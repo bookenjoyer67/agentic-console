@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "coursetools": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "/workspace/mcp/coursetools_server.py"
+      ],
+      "env": {}
+    },
+    "storage": {
+      "type": "http",
+      "url": "http://localhost:8001/mcp"
+    },
+    "retrieval": {
+      "type": "http",
+      "url": "http://localhost:8002/mcp"
+    },
+    "gate": {
+      "type": "http",
+      "url": "http://localhost:8003/mcp"
+    }
+  }
+}
