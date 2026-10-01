@@ -156,7 +156,7 @@ and what each branch does instead:
 
 ## Tests
 
-133 tests: 71 frame tests, 8 refresh tests, and 54 unit tests.
+138 tests: 71 frame tests, 8 refresh tests, and 59 unit tests.
 
     cargo test --release --offline
 
