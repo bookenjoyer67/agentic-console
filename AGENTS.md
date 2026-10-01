@@ -149,7 +149,7 @@ cargo test --release --offline                                 # the console's f
 - The formatting step is CI's first one (`.github/workflows/ci.yml:26` `run: cargo fmt --check`).
 - The pipeline's own suites run under pytest inside the container
   (`python3 -m pytest eval/test_policy.py eval/test_deterministic_step.py -q` -> `90 passed`).
-- The last measured console run is `cargo test --release` -> `133 passed, 0 failed` (54 unit tests, 71
+- The last measured console run is `cargo test --release` -> `138 passed, 0 failed` (59 unit tests, 71
   frame tests, 8 refresh tests). Re-run it after touching the sources: a count read from a run that printed
   no `Compiling` line is the *previous* binary's count, and appending to a test file with a heredoc can
   leave an mtime older than the binary that was built before it.
