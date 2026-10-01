@@ -3,7 +3,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agentic_console::{actions, config::Config, dump, state, timings, ui, USAGE};
+use agentic_console::{
+    actions::{self, ActionKind, Guards, PromptTarget},
+    app,
+    config::Config,
+    conversation::{Conversation, DEFAULT_RING},
+    dump, probe, state, timings, ui, USAGE,
+};
 
 #[derive(Debug, Default)]
 struct Args {
@@ -15,6 +21,9 @@ struct Args {
     dry_run_actions: bool,
     dry_run_action: Option<String>,
     value: Option<String>,
+    /// `--prompt TEXT`: send one turn of this console's own conversation, for a script and for the
+    /// end-to-end test.
+    prompt: Option<String>,
     help: bool,
 }
 
@@ -39,6 +48,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--container" => args.container = Some(take_value("--container")?),
             "--dry-run-action" => args.dry_run_action = Some(take_value("--dry-run-action")?),
             "--value" => args.value = Some(take_value("--value")?),
+            "--prompt" => args.prompt = Some(take_value("--prompt")?),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
         index += 1;
@@ -80,10 +90,9 @@ fn main() -> ExitCode {
     }
 
     if args.dump {
-        print!(
-            "{}",
-            dump::render(&config, &state::Snapshot::collect(&config))
-        );
+        let mut out = dump::render(&config, &state::Snapshot::collect(&config));
+        dump::render_conversation(&mut out, &Conversation::new(DEFAULT_RING));
+        print!("{out}");
         return ExitCode::SUCCESS;
     }
     if args.probe_timings {
@@ -107,6 +116,10 @@ fn main() -> ExitCode {
         }
     }
 
+    if let Some(prompt) = args.prompt.clone() {
+        return run_prompt(&config, &prompt);
+    }
+
     match ui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -114,4 +127,108 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--prompt TEXT`: send one turn and print it, for a script and for the end-to-end test.
+///
+/// The same argv the composer builds -- `actions::build` with `ActionKind::Prompt` through the same
+/// config -- run without the confirmation screen, because this mode *is* the operator's decision: a
+/// line typed on a command line is a confirmed one. The turn's own stream is printed line by line as
+/// it arrives, then the console's own transcript, so a caller can read either.
+///
+/// Nothing is invented when the turn fails: a rate-limited turn prints the run's own envelope
+/// (`is_error: true`) and the transcript's refusal line, because the whole point of the transcript is
+/// that it does not draw a failure as a success.
+fn run_prompt(config: &Config, prompt: &str) -> ExitCode {
+    let minted = match agentic_console::uuid::v4() {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("agentic-console: no session id could be minted: {error}; nothing was sent");
+            return ExitCode::from(2);
+        }
+    };
+    let guards = Guards {
+        evaluated: false,
+        prompt: PromptTarget {
+            session: None,
+            minted: Some(minted),
+        },
+        ..Guards::default()
+    };
+    let command = match actions::build(config, ActionKind::Prompt, prompt, guards) {
+        Ok(command) => command,
+        Err(reason) => {
+            eprintln!("agentic-console: {reason}");
+            return ExitCode::from(2);
+        }
+    };
+    println!("argv: {}", command.display());
+    for line in &command.note {
+        println!("note: {line}");
+    }
+    let started = match actions::start(&command) {
+        Ok(started) => started,
+        Err(error) => {
+            eprintln!("agentic-console: could not start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut conversation = Conversation::new(DEFAULT_RING);
+    conversation.open_turn(prompt);
+    conversation.note(format!("the console ran: {}", command.display()));
+    let mut child = started.child;
+    let status_word = loop {
+        for channel in &started.channels {
+            while let Ok(line) = channel.try_recv() {
+                println!("{line}");
+                conversation.apply_line(&line);
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break match status.code() {
+                    Some(code) => format!("exited with code {code}"),
+                    None => "was killed by a signal".to_string(),
+                };
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(error) => break format!("could not be waited on: {error}"),
+        }
+    };
+    // The reader threads may still be holding the last of the stream: the child's exit does not
+    // guarantee the lines have crossed the channel yet, and a transcript that loses its own last line
+    // is the exact lie this console exists not to tell.
+    for channel in &started.channels {
+        while let Ok(line) = channel.try_recv() {
+            println!("{line}");
+            conversation.apply_line(&line);
+        }
+    }
+    conversation.close_turn(&status_word);
+    println!("\n{status_word}");
+    // The run's own record is the only thing that can confirm the lines just streamed, and this path
+    // has no worker to take that read, so it is taken here, once the child has exited and everything it
+    // was going to write has been written. The reasoning is the same function the interactive console
+    // uses, so the two cannot describe one read differently.
+    if let Some(session) = conversation.session.clone() {
+        let path = format!(
+            "{}/{session}.jsonl",
+            config.console.session_dir.trim_end_matches('/')
+        );
+        let read = probe::container_transcript(
+            &config.console.container,
+            &session,
+            &path,
+            probe::TRANSCRIPT_TAIL_BYTES,
+            probe::now(),
+        );
+        println!("record: {}", read.source);
+        let (confirmed, note) = app::reconcile_read(&mut conversation, &session, &read);
+        conversation.note(note);
+        println!("reconciled: {confirmed} line(s)");
+    }
+    let mut out = String::new();
+    dump::render_conversation(&mut out, &conversation);
+    print!("{out}");
+    ExitCode::SUCCESS
 }

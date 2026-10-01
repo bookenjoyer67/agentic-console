@@ -100,6 +100,33 @@ impl Ruling {
     }
 }
 
+/// How one turn of a conversation is invoked: the flags the CLI takes after the prompt.
+///
+/// Not to be confused with [`crate::conversation::Conversation`], which is the transcript this console
+/// owns. This is the invocation; that is the buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conversation {
+    /// The flags every turn carries, after the prompt.
+    ///
+    /// Measured rather than guessed (`docs/spikes/prompt-surface-protocol.md` §1): without
+    /// `--output-format stream-json --verbose` the CLI answers in prose, and `--include-partial-messages`
+    /// is what makes a turn arrive as it is written rather than all at once at the end.
+    pub stream_flags: Vec<String>,
+}
+
+impl Default for Conversation {
+    fn default() -> Conversation {
+        Conversation {
+            stream_flags: vec![
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--verbose".to_string(),
+                "--include-partial-messages".to_string(),
+            ],
+        }
+    }
+}
+
 /// The `console` block: the runtime facts a console needs that the rest of the config does not carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Console {
@@ -116,6 +143,8 @@ pub struct Console {
     pub orchestration_steps: Vec<OrchStep>,
     /// The flags the orchestrator invocation carries, after the model-facing `-p <brief>` argument.
     pub claude_flags: Vec<String>,
+    /// How one turn of a conversation this console drives is invoked.
+    pub conversation: Conversation,
     /// The container path holding the CLI's session transcripts, one `<session-id>.jsonl` per
     /// session. The ruling action resumes a session **by id**, so this is the read that names one.
     pub session_dir: String,
@@ -133,8 +162,6 @@ pub struct Console {
     /// The canned rulings the chooser offers, in order. `Enter` sends the first one written for the
     /// checkpoint that is open.
     pub rulings: Vec<Ruling>,
-    /// `console.*` keys the config still carries at the Komun default.
-    pub komun_defaults: Vec<String>,
 }
 
 impl Default for Console {
@@ -189,6 +216,7 @@ impl Default for Console {
                 "--permission-mode".to_string(),
                 "acceptEdits".to_string(),
             ],
+            conversation: Conversation::default(),
             session_dir: "/root/.claude/projects/-workspace".to_string(),
             session_window_seconds: 120,
             role_container_prefix: "agent-rev-m4-".to_string(),
@@ -263,20 +291,6 @@ impl Default for Console {
                 ),
                 human("HUMAN CHECKPOINT 2 (release approval)"),
                 step("project-manager closes", Some("project-manager")),
-            ],
-            komun_defaults: vec![
-                "container".into(),
-                "claude_command".into(),
-                "ports".into(),
-                "evidence_dir".into(),
-                "briefs_dir".into(),
-                "ci_jobs".into(),
-                "orchestration_steps".into(),
-                "claude_flags".into(),
-                "session_dir".into(),
-                "session_window_seconds".into(),
-                "role_container_prefix".into(),
-                "checkpoint_fresh_minutes".into(),
             ],
         }
     }
@@ -493,34 +507,92 @@ impl Config {
             .unwrap_or_else(|| "Cargo.toml".to_string())
     }
 
-    /// `port.komun_defaults`, as `(dotted key, recorded default)` pairs, sorted by key.
-    pub fn komun_defaults(&self) -> Vec<(String, String)> {
+    /// `port.seams` paired with what the nearest ancestor records for each, sorted by key.
+    ///
+    /// This read `port.komun_defaults`: one flat map holding the FIRST ancestor's values. A map like
+    /// that cannot describe a fork of a fork -- its values belong to a generation this repository may
+    /// never have seen, a seam it never listed could hold any generation's leftover and go
+    /// unreported, and a nested value like `console.ports` had nowhere to go. `port.seams` names what
+    /// a fork must review and `port.ancestors` records each generation in order, so a value is
+    /// attributed to the generation it actually came from.
+    pub fn recorded_seams(&self) -> Vec<(String, String)> {
         let mut pairs: Vec<(String, String)> = self
-            .get("port.komun_defaults")
-            .and_then(Value::as_object)
-            .map(|map| {
-                map.iter()
-                    .map(|(key, value)| (key.clone(), render_value(value)))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .seams()
+            .into_iter()
+            .filter_map(|key| self.recorded_for(&key).map(|recorded| (key, recorded)))
+            .collect();
         pairs.sort();
         pairs
     }
 
-    /// Whether the value at `dotted` still equals the default `port.komun_defaults` records for it.
-    pub fn at_komun_default(&self, dotted: &str) -> bool {
-        // `port.komun_defaults` is a flat map whose keys are themselves dotted, so the value has to
-        // be looked up by exact key: splitting the path would look for a nested `project` object.
-        let recorded = self
-            .get("port.komun_defaults")
+    /// `port.seams`: the dotted keys that carry this repository's identity, so every fork reviews
+    /// them. The check sweeps every one of these values out of the consumers, and fails when one
+    /// still equals what an ancestor shipped. A value where staying is legitimate belongs in
+    /// `port.ancestors[].review` instead, which the console reports and the check does not sweep.
+    pub fn seams(&self) -> Vec<String> {
+        self.get("port.seams")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What the nearest ancestor in `port.ancestors` records for `dotted`, if any generation does.
+    fn recorded_for(&self, dotted: &str) -> Option<String> {
+        self.ancestors()
+            .iter()
+            .rev()
+            .find_map(|ancestor| recorded_in(ancestor, "seams", dotted))
+            .map(|recorded| render_value(&recorded))
+    }
+
+    /// `port.ancestors`, oldest first: each entry names a generation and carries what it shipped.
+    fn ancestors(&self) -> Vec<Value> {
+        self.get("port.ancestors")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The seam keys `port.kept` declares deliberately equal to an ancestor's. Kept means the config
+    /// carries a written reason: restoring an ancestor's value can be the right act, so "must differ"
+    /// cannot be an absolute rule -- but a value nobody wrote a reason for still has to differ.
+    fn kept_seams(&self) -> Vec<String> {
+        self.get("port.kept")
             .and_then(Value::as_object)
-            .and_then(|map| map.get(dotted))
-            .map(render_value);
-        match (recorded, self.get_text(dotted)) {
-            (Some(recorded), Some(current)) => recorded == current,
-            _ => false,
+            .map(|kept| kept.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `dotted` still holds a value some ancestor shipped.
+    ///
+    /// EVERY generation is checked, not only the parent: a literal two generations back is exactly
+    /// what a parent-only comparison cannot see. Both records count -- `seams` (identity, which a
+    /// fork must change) and `review` (values where staying is legitimate, such as the CLI's own
+    /// name, and which the console therefore reports rather than treats as a defect). A key
+    /// `port.kept` names is excluded, because the config carries a written reason for that value.
+    ///
+    /// This compared only list MEMBERSHIP once, for `console.*` keys: a key that was listed answered
+    /// "still the reference's" even when its value had plainly changed, so a reviewer reading the
+    /// screen was told a re-pointed value was untouched. It compares values now.
+    pub fn inherited(&self, dotted: &str) -> bool {
+        if self.kept_seams().iter().any(|kept| kept == dotted) {
+            return false;
         }
+        let current = match self.get_text(dotted) {
+            Some(current) => current,
+            None => return false,
+        };
+        self.ancestors().iter().any(|ancestor| {
+            ["seams", "review"].iter().any(|record| {
+                recorded_in(ancestor, record, dotted).map(|v| render_value(&v))
+                    == Some(current.clone())
+            })
+        })
     }
 
     /// The container name `scripts/run-agent.sh` gives a role box.
@@ -539,8 +611,10 @@ impl Config {
     }
 
     /// Whether a `console.*` key is listed as still at the Komun default.
-    pub fn console_at_default(&self, key: &str) -> bool {
-        self.console.komun_defaults.iter().any(|entry| entry == key)
+    /// The inherited state of one `console.*` key, by its SHORT name -- the form the INSPECT screen
+    /// has in hand when it renders a console seam.
+    pub fn console_inherited(&self, short: &str) -> bool {
+        self.inherited(&format!("console.{short}"))
     }
 
     /// The canned rulings, in the order `console.rulings` writes them.
@@ -682,6 +756,23 @@ impl Console {
                 .map(str::to_string)
                 .collect();
         }
+        if let Some(flags) = value
+            .get("conversation")
+            .and_then(|block| block.get("stream_flags"))
+            .and_then(Value::as_array)
+        {
+            let parsed: Vec<String> = flags
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            // An empty list would leave a turn with no streaming flags at all, which reads the run's
+            // own words as prose at the end instead of as events: the absent-or-empty case keeps the
+            // defaults rather than accepting a config that silently un-streams the console.
+            if !parsed.is_empty() {
+                console.conversation.stream_flags = parsed;
+            }
+        }
         if let Some(prefix) = value.get("role_container_prefix").and_then(Value::as_str) {
             console.role_container_prefix = prefix.to_string();
         }
@@ -752,15 +843,19 @@ impl Console {
                 console.rulings = parsed;
             }
         }
-        if let Some(list) = value.get("komun_defaults").and_then(Value::as_array) {
-            console.komun_defaults = list
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
-        }
         console
     }
+}
+
+/// One recorded value for `dotted` out of one record (`seams` or `review`) on one ancestor entry.
+/// Both maps are flat and their keys are themselves dotted, so the value is looked up by exact key:
+/// splitting the path would look for a nested `project` object.
+fn recorded_in(ancestor: &Value, record: &str, dotted: &str) -> Option<Value> {
+    ancestor
+        .get(record)
+        .and_then(Value::as_object)
+        .and_then(|map| map.get(dotted))
+        .cloned()
 }
 
 /// A stable id for a ruling whose config entry left one out: its text, lowercased, with every run
@@ -862,18 +957,28 @@ pub fn embedded_defaults() -> Value {
         },
         "classification": {"governed_globs": [".claude/agents/*", "mcp/*", "eval/*", ".github/workflows/*"]},
         "port": {
-            "komun_defaults": {
-                "project.name": "komun",
-                "toolchain.commands.clippy.guard.marker": "Checking komun-server",
-                "containers.base_image": "agent-sandbox:komun",
-                "containers.tools_image": "agent-sandbox:komun-m3",
-                "containers.registry_volume": "komun-cargo-registry",
-                "containers.networks.internal": "agent-internal",
-                "containers.networks.broker": "agent-net",
-                "containers.broker.name": "rev-broker",
-                "artifacts.project_key": "proj-komun",
-                "artifacts.style_rules": "docs/DOC-STYLE.md"
-            }
+            "seams": ["project.name", "toolchain.commands.clippy.guard.marker",
+                      "containers.base_image", "containers.tools_image", "containers.registry_volume",
+                      "containers.networks.internal", "containers.networks.broker",
+                      "containers.broker.name", "artifacts.project_key"],
+            "ancestors": [{
+                "name": "komun",
+                "seams": {
+                    "project.name": "komun",
+                    "toolchain.commands.clippy.guard.marker": "Checking komun-server",
+                    "containers.base_image": "agent-sandbox:komun",
+                    "containers.tools_image": "agent-sandbox:komun-m3",
+                    "containers.registry_volume": "komun-cargo-registry",
+                    "containers.networks.internal": "agent-internal",
+                    "containers.networks.broker": "agent-net",
+                    "containers.broker.name": "rev-broker",
+                    "artifacts.project_key": "proj-komun"
+                },
+                "review": {
+                    "console.claude_command": "claude",
+                    "console.claude_flags": ["--agent", "orchestrator", "--permission-mode", "acceptEdits"]
+                }
+            }]
         }
     })
 }

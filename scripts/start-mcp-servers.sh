@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the Module 3 MCP servers inside the Komun sandbox container (Agentic Engineer 3.2).
+# Start the Module 3 MCP servers inside the agentic-console sandbox container (Agentic Engineer 3.2).
 #
 #   storage    streamable HTTP, port 8001, mcp/storage/server.py
 #   retrieval  streamable HTTP, port 8002, mcp/retrieval/server.py
@@ -33,13 +33,13 @@ COURSETOOLS_SERVER="$WORKSPACE/mcp/coursetools_server.py"
 # --- fail loudly, before any half-started state ---------------------------------------------
 command -v python3 >/dev/null 2>&1 || {
   echo "ERROR: python3 is not on PATH. The Module 3 servers need the image's Python 3.12." >&2
-  echo "       Use agent-sandbox:komun-m3 (sandbox/Dockerfile.m3), not the Module 1 image." >&2
+  echo "       Use agent-sandbox:console-m1 (sandbox/Dockerfile.m3), not the Module 1 image." >&2
   exit 1
 }
 
 python3 -c 'import fastmcp' >/dev/null 2>&1 || {
   echo "ERROR: this python3 cannot import fastmcp, so no MCP server will start." >&2
-  echo "       Use agent-sandbox:komun-m3, built with: docker build -f sandbox/Dockerfile.m3 -t agent-sandbox:komun-m3 ." >&2
+  echo "       Use agent-sandbox:console-m1, built with: docker build -f sandbox/Dockerfile.m3 -t agent-sandbox:console-m1 ." >&2
   exit 1
 }
 

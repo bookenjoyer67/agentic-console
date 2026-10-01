@@ -6,6 +6,24 @@ the fork is real.
 
     bash scripts/port-self-test.sh --fork
 
+## The seam table changed after this document was measured
+
+The check this file is about was rewritten after the run recorded below, and the change is larger than a
+refactor. It no longer reads one `*_defaults` map holding the FIRST ancestor's values; it reads a declared
+`port.seams` list plus the whole `port.ancestors` chain, and it derives the files it reads from the tree's
+wiring rather than from a hand list of seven. Three defects went with the old shape, and each one made this
+instrument quieter than it looked: it could not see a value two generations back, because its baseline was
+the first ancestor and not the parent; it could not see a wiring file nobody had listed, which is how
+`scripts/start-mcp-servers.sh` kept the reference project's image name while the check stayed green; and it
+had nowhere to record a value an ancestor legitimately shares, so such a value would have been reported as
+drift and the map was hand-trimmed to avoid that, which is what made it incomplete.
+
+Every section below that quotes a measurement -- the instrument's own output, the two columns of the seam
+table, the console's dump, the pass counts -- was taken against the earlier check. They are marked here
+rather than deleted, and not restated from memory: they need re-measuring against the check that is in the
+tree now. `docs/DOC-STYLE.md` states the rule this follows: do not delete the claim, and do not invent
+authority for it.
+
 ## What the instrument measures
 
 `scripts/port-self-test.sh` does three things, and the third only exists in `--fork` mode:

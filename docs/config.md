@@ -20,15 +20,18 @@ repository is compiled into the binary, so the same crate drives any repository 
 | `checkpoint_fresh_minutes` | `30` | how fresh a journal record must be to name a checkpoint |
 | `session_dir` | `/root/.claude/projects/-workspace` | where the named session's own transcript lives, inside the container |
 | `session_window_seconds` | `120` | how recent a session must be to count as this run's |
+| `conversation.stream_flags` | `["--output-format", "stream-json", "--verbose", "--include-partial-messages"]` | the flags every turn carries after the prompt; absent, or empty, keeps these four — a turn with no streaming flags reads the run's own words as one block when the turn ends instead of as events while it is written |
+| `console_probe_cadence.probes.conversation_transcript` | `3` | how often the console's **own** session's record is re-read. It is forced when a turn ends, so this cadence governs the passive case: a long turn's lines move from LIVE to CONFIRMED while it is still running |
 | `ci_jobs`, `orchestration_steps` | | the pipeline as data: the lanes and steps FLOW draws |
-| `komun_defaults` | a list of key names | see below |
 | `rulings` | three canned rulings | see below |
 
-### `komun_defaults`
+### How the console decides a value is still a reference's
 
-A list of the keys whose values are still the reference repository's. A fork that changes one of them
-**deletes its key from this list**, and that deletion is what the console reads to mark a value as the fork's
-rather than the reference repository's. The INSPECT screen's seam panel shows the result.
+There is no list to maintain. The console compares each `console.*` value against `port.ancestors` — the chain
+of generations this repository descends from — and marks the value as still a reference's default when it
+matches one, naming the generation it reaches back to. A value that matches several is reported against the
+oldest, which is the sharper statement: unchanged since that generation. Changing a value is all a fork has to
+do; the seam panel on INSPECT shows the result.
 
 ### `rulings`
 
@@ -50,7 +53,7 @@ nothing here makes the screen wait.
 
 The `probes` table names each probe it tunes: `docker_ps`, `container_ps`, `ports`, `sessions`,
 `session_transcript`, `gate_journal`, `storage_journal`, `retrieval_journal`, `files`, `pipeline`,
-`conversions`, `grants`, `selftest_record`, `port_self_test_record`, `evidence_files`, `evidence_tails`,
+`conversions`, `scorecards`, `grants`, `selftest_record`, `port_self_test_record`, `evidence_files`, `evidence_tails`,
 `gate_allowlist`, and `gate_list` — the expensive one, which asks the running gate server for its own gate
 list and costs about a second and a half. A reading's age on the screen is the age of the read, never the age
 of the collect that served it, and `r` forces every probe regardless of this table.

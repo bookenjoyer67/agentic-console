@@ -1,0 +1,43 @@
+# The scorecard driver's Python dependency: Azathoth, the workflow evaluation library.
+#
+# This is a HOST-side toolchain, not the container's. `scripts/redteam_scorecard.py` reads this
+# repository's red-team corpus and writes a scorecard artifact into the console's evidence directory,
+# so it runs where that directory is: the host. The container's toolchain stays where it is, in
+# `sandbox/requirements-m3.txt`, and neither file is the other's dependency set.
+#
+# Create the interpreter it runs under with:
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements-scorecard.txt
+#     .venv/bin/python scripts/redteam_scorecard.py
+#
+# Why a commit pin and not a version or a name:
+#
+#   * `azathoth-ai` is NOT on PyPI. `pip install azathoth-ai` fails: the project is published only as
+#     a source repository. Verified against the index: https://pypi.org/pypi/azathoth-ai/json is 404.
+#   * PyPI's `azathoth` IS taken, by an unrelated project (Fernando Bryan Reza Campos, "Azathoth:
+#     Dual-Protocol AI Intelligence Layer"). It is a different codebase with a different licence and
+#     no relationship to this one, and it installs a module named `azathoth` too -- so installing by
+#     name would silently supply the wrong library to a script that imports `azathoth`. Never change
+#     this line to a bare name.
+#   * Upstream is pre-release and moves its public API between versions (0.1.0 -> 1.0.0 renamed
+#     `PromptStrategySpec.model_requirements` to a required `model_selection`, and moved the model out
+#     of `azathoth.strategies`), so a floating ref would break this driver without warning. A full
+#     commit SHA is immutable, and it is the integrity pin here: `--require-hashes` cannot be used
+#     with a VCS requirement, so pinning the commit is what makes the install reproducible.
+#
+# Licence: MIT. The pinned revision declares `License :: OSI Approved :: MIT License` in its metadata
+# and ships an MIT `LICENSE` file (Copyright (c) 2024 Eldritch, Inc.). Earlier revisions of the
+# project declared `license = { text = "TBD" }` while shipping the same MIT file; upgrading to this
+# revision is what settles it, and the metadata now agrees with the file.
+#
+# Revision: 379767ed9c7e81d07913cde749f61d1df5b52560 is upstream `main` as of 2026-09-30, released as
+# version 1.0.0 by its own metadata.
+#
+# Transitive dependencies are upstream's to declare (its metadata names httpx<1,>=0.28 and pydantic>=2
+# as runtime requirements), so they are deliberately not pinned again here. The driver needs no extra
+# packages: it is stdlib plus azathoth.
+#
+# Interpreter: the pinned revision declares `Requires-Python >=3.11`, so the venv above must be 3.11 or
+# newer. Nothing here constrains the console, which is Rust and reads only the artifact.
+azathoth-ai @ git+https://github.com/EldritchInc/azathoth@379767ed9c7e81d07913cde749f61d1df5b52560

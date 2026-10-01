@@ -99,6 +99,45 @@ pub fn warning() -> Style {
     Style::default().fg(Color::Yellow)
 }
 
+/// The operator's own words in the transcript.
+pub fn you() -> Style {
+    Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The run's own words in the transcript.
+pub fn agent() -> Style {
+    Style::default()
+}
+
+/// A tool call the run made, as its own stream named it.
+pub fn tool() -> Style {
+    Style::default().fg(Color::Yellow)
+}
+
+/// What a tool returned.
+pub fn result() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// A line this console wrote itself: an argv, a count, an envelope it does not read.
+pub fn console() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// A refusal, in the console's own words.
+pub fn refused() -> Style {
+    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+}
+
+/// The streaming cursor: the run is writing this item now.
+pub fn streaming() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// Clip a composed row to `width` columns, ending in an ellipsis when anything was cut.
 ///
 /// One row stays one row. A row left free to wrap silently drops whatever falls past the panel's

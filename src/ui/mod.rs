@@ -1,6 +1,12 @@
-//! The terminal shell: the header, the three screens, the action log pane, the status bar and the
-//! modal states (action menu, value input, command confirmation, key reference).
+//! The terminal shell: the header, the screens, the action log pane, the status bar and the modal
+//! states (action menu, value input, command confirmation, key reference).
+//!
+//! The primary screen is the CONVERSATION screen (`conversation` below). The three screens this
+//! console shipped with are overlays over it, drawn by exactly the code that drew them as tabs:
+//! `draw_overlay` is that code, parameterized by the screen it draws and by the rect it draws into.
+//! An overlay is not a smaller canvas -- it is the same drawing, in front of a different screen.
 
+pub mod conversation;
 pub mod flow;
 pub mod inspect;
 pub mod live;
@@ -22,7 +28,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::actions;
-use crate::app::{App, Mode, Tab};
+use crate::app::{App, Mode, Screen};
 use crate::config::Config;
 use crate::iso;
 
@@ -30,8 +36,18 @@ use crate::iso;
 pub const KEY_REFERENCE: &[(&str, &str)] = &[
     ("q / Ctrl-C", "quit"),
     (
+        "i or / (on CONVERSATION)",
+        "focus the composer: type a prompt, Enter reviews its exact command in the composer box \
+         itself, Esc closes the composer and keeps the text, Ctrl-U clears the line",
+    ),
+    (
         "1 / 2 / 3, Tab, Shift-Tab",
-        "the FLOW, LIVE and INSPECT screens",
+        "the CONVERSATION screen and the FLOW, LIVE and INSPECT overlays. An overlay is a screen \
+         drawn in front of the conversation, and any of them is one keystroke away",
+    ),
+    (
+        "Esc (on an overlay)",
+        "close the overlay and come back to the CONVERSATION screen",
     ),
     (
         "j / k, Up / Down",
@@ -153,15 +169,52 @@ pub fn step<B: ratatui::backend::Backend>(
 }
 
 /// Draw one frame.
+///
+/// The primary screen is drawn first and fills the frame; an overlay is then drawn in front of it,
+/// one row short, with its own title row saying which screen this is and the one key that leaves it.
+/// That is the whole of the change: the three screens this console shipped with are reachable at the
+/// same keys, drawn by the same code, and the conversation is what is underneath.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    match app.view {
+        Screen::Conversation => draw_overlay(frame, area, app, Screen::Conversation),
+        overlay => {
+            draw_overlay(frame, area, app, Screen::Conversation);
+            // An overlay is **opaque**. A `Paragraph` only writes the cells it has text for, so without
+            // this the conversation's own words show through the gaps of the screen drawn in front of
+            // it -- which reads as the overlay containing text it never wrote. "Drawn in front of" has
+            // to mean the screen underneath is not visible, or the frame cannot be trusted.
+            frame.render_widget(Clear, area);
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            draw_overlay_title(frame, rows[0], app, overlay);
+            draw_overlay(frame, rows[1], app, overlay);
+        }
+    }
+}
+
+/// Draw one screen into `area`, whatever rect that is.
+///
+/// This is the composition this console has always drawn, parameterized by the screen: the header,
+/// the screen's own body, the FLOW detail pane, the action log and the footer, with the modal on top.
+/// Handed the whole frame, it draws the whole frame -- which is what the frame tests do, and why this
+/// refactor changes no assertion they make: an overlay is not a smaller canvas, it is the same
+/// drawing in front of a different screen.
+pub fn draw_overlay(frame: &mut Frame, area: Rect, app: &App, screen: Screen) {
+    if screen == Screen::Conversation {
+        conversation::draw(frame, area, app);
+        draw_modal(frame, area, app);
+        return;
+    }
     let log_lines = app.log.len().min(9) as u16;
     let log_height = if app.show_log && area.height > 22 {
         log_lines + 2
     } else {
         0
     };
-    let detail_height = if app.tab == Tab::Flow && area.height > 24 {
+    let detail_height = if screen == Screen::Flow && area.height > 24 {
         8
     } else {
         0
@@ -173,15 +226,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Min(8),
             Constraint::Length(detail_height),
             Constraint::Length(log_height),
-            Constraint::Length(2),
+            // Three rows, not two: the footer's block draws a top border, the checkpoint line and the
+            // key line. At two rows the key line was clipped by the border -- it has never been on the
+            // glass, and the first test that looked for it found that out.
+            Constraint::Length(3),
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], app);
-    match app.tab {
-        Tab::Flow => flow::draw(frame, chunks[1], app),
-        Tab::Live => live::draw(frame, chunks[1], app),
-        Tab::Inspect => inspect::draw(frame, chunks[1], app),
+    draw_header(frame, chunks[0], app, screen);
+    match screen {
+        Screen::Flow => flow::draw(frame, chunks[1], app),
+        Screen::Live => live::draw(frame, chunks[1], app),
+        Screen::Inspect => inspect::draw(frame, chunks[1], app),
+        Screen::Conversation => {}
     }
     if detail_height > 0 {
         draw_detail(frame, chunks[2], app);
@@ -193,11 +250,42 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_modal(frame, area, app);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+/// The overlay's own title row: which screen this is, what it is a reading of, and the key that
+/// closes it. It is one row because an overlay that spent more than one would be a screen that
+/// pushed the conversation off the glass.
+fn draw_overlay_title(frame: &mut Frame, area: Rect, app: &App, screen: Screen) {
+    let line = Line::from(vec![
+        Span::styled(format!(" {} ", screen.title()), style::tab_style(true)),
+        Span::raw("   "),
+        Span::styled(
+            "an overlay in front of the CONVERSATION screen -- Esc closes it",
+            style::dim(),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            format!(
+                "read {}",
+                iso::age_text(app.last_refresh, std::time::SystemTime::now())
+            ),
+            style::dim(),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(Text::from(line)), area);
+}
+
+fn draw_header(frame: &mut Frame, area: Rect, app: &App, screen: Screen) {
     let mut spans: Vec<Span> = Vec::new();
-    for tab in [Tab::Flow, Tab::Live, Tab::Inspect] {
-        let title = format!(" {} ", tab.title());
-        if tab == app.tab {
+    // The strip carries the primary screen as well as the three overlays, in the short labels the
+    // 80-column target can hold: the full titles live on the overlay's own title row and in the key
+    // reference. What is highlighted is the screen the operator is looking at.
+    for candidate in [
+        Screen::Conversation,
+        Screen::Flow,
+        Screen::Live,
+        Screen::Inspect,
+    ] {
+        let title = format!(" {} ", candidate.tab_label());
+        if candidate == screen {
             spans.push(Span::styled(title, style::tab_style(true)));
         } else {
             spans.push(Span::styled(title, style::tab_style(false)));
@@ -222,7 +310,23 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     let mut lines = vec![Line::from(spans)];
-    let mut context = vec![
+    // The buffer line comes **first** on the context row, before the repo, the config and the container.
+    // Everything after it is variable-length -- a checkout path can be 80 columns on its own -- and a
+    // line that says how much of the console's own transcript is confirmed must not be the thing that
+    // falls off the end of a narrow terminal. What it displaces is still on INSPECT and in `--dump`.
+    //
+    // It is on every screen, not only CONVERSATION: an operator reading the LIVE overlay still reads
+    // that the console's own transcript is `12 item(s), 9 confirmed`, and against which session. One
+    // line, one wording, built by `Conversation::header_line`, so the pane, the header and `--dump`
+    // cannot drift apart. An empty buffer draws nothing: `0 item(s)` on four screens is noise.
+    let mut context = Vec::new();
+    if !app.conversation.is_empty() {
+        // No label of its own: `header_line` already begins "buffer: ...", and two words for one line
+        // is how a header starts reading as decoration.
+        context.push(Span::styled(app.conversation.header_line(), style::dim()));
+        context.push(Span::raw("   "));
+    }
+    context.extend([
         Span::styled("repo ", style::dim()),
         Span::raw(app.config.repo.display().to_string()),
         Span::styled("   config ", style::dim()),
@@ -234,7 +338,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             app.last_refresh,
             std::time::SystemTime::now(),
         )),
-    ];
+    ]);
     if app.snapshot.live.run.in_flight {
         context.push(Span::styled(
             format!("   RUN IN FLIGHT (el {})", app.snapshot.live.run.elapsed),
@@ -313,7 +417,20 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
     let keys =
-        "q quit  1/2/3 tabs  j/k select  r refresh  a actions  Enter approve  e chooser  t brief  L log  ? help";
+        "q quit  i compose  Esc back  1/2/3 screens  j/k select  r refresh  a actions  Enter \
+                approve  e chooser  t brief  L log  ? help";
+    // Below 24 rows the key line is dropped **loudly**: the row it would have used says that it is
+    // hidden, and where to find it. Silent clipping is a lie the operator cannot detect -- the same
+    // reason a dropped transcript item is counted rather than trimmed.
+    let height = frame.area().height;
+    let second = if height < 24 {
+        Line::from(Span::styled(
+            " the key line is hidden at this height (press ? for the key reference)",
+            style::warning(),
+        ))
+    } else {
+        Line::from(Span::styled(format!(" {keys}"), style::dim()))
+    };
     // The status bar carries the checkpoint card's state, not only the card: the state word alone
     // would repeat the overclaim, so the state's own name and what it rests on are printed here,
     // in the state's own colour, whatever screen is open.
@@ -332,7 +449,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(checkpoint, style::card_style(card.state)),
                 Span::styled(format!("   {status}"), style::warning()),
             ]),
-            Line::from(Span::styled(format!(" {keys}"), style::dim())),
+            second,
         ]))
         .block(Block::default().borders(Borders::TOP)),
         area,
@@ -362,6 +479,10 @@ fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
 fn draw_modal(frame: &mut Frame, area: Rect, app: &App) {
     match &app.mode {
         Mode::Normal => {}
+        // The composer is not a modal: it is drawn in the composer box, where the operator is looking,
+        // and the prompt's confirmation is drawn there too -- the same four things this modal shows
+        // for every other action, in the place the text was typed.
+        Mode::Composer { .. } | Mode::PromptConfirm { .. } => {}
         Mode::Help => {
             let popup = centered(area, 84, 26);
             frame.render_widget(Clear, popup);

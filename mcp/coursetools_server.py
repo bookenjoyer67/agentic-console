@@ -129,7 +129,7 @@ KOMUN_GATES: list[str] = [
 ]
 
 RECORDED_GATE_RESULTS: dict[str, str] = {
-    "cargo test --workspace": "158 passed, 0 failed, 0 ignored (20 in komun-core, 138 in komun-server)",
+    "cargo test --workspace": "138 passed, 0 failed, 0 ignored (agentic-console)",
     "cargo clippy --release -- -D warnings": "0 warnings",
     "cargo fmt --check": "clean, 0 diffs",
     "cd web && npm run check": "0 errors, 0 warnings",
@@ -236,8 +236,7 @@ def web_search(role: str, question: str) -> dict[str, Any]:
         "key_facts": [
             "Migrations are numbered files: 001_schema.sql, 002_directory_open_registration.sql, "
             "003_drop_matches_message.sql (ls migrations).",
-            "The server embeds them with sqlx::migrate!(\"../../migrations\") "
-            "(crates/server/src/main.rs:78).",
+            "The server embeds them with sqlx::migrate!(\"../../migrations\").",
             "Add a new file for a new change; never rewrite an applied migration, because the "
             "recorded version checksum stops matching.",
             "Keep the Rust query and the generated frontend types in step, then re-run "

@@ -15,10 +15,11 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 
-use agentic_console::actions::{self, ActionKind, Guards};
-use agentic_console::app::{App, Mode, Running, Tab};
+use agentic_console::actions::{self, ActionKind, Guards, PromptTarget};
+use agentic_console::app::{App, Mode, Running, Screen};
 use agentic_console::checkpoint::{Card, CardState, SessionEvidence, SessionRead, SessionRef};
 use agentic_console::config::Config;
+use agentic_console::conversation::ItemKind;
 use agentic_console::dump;
 use agentic_console::iso;
 use agentic_console::probe::{self, Reading};
@@ -116,9 +117,27 @@ impl Fixture {
                 stamp_now()
             ),
         );
+        // The Azathoth scorecard: written by the driver into the console's own evidence directory,
+        // read here and never written here. It carries its OWN sentence about the axes it does not
+        // measure, so the panel can print that sentence rather than composing one of its own.
+        write(
+            &evidence.join("scorecards/redteam-scorecard.json"),
+            r#"{
+  "artifact": "redteam-scorecard",
+  "axes_clause": "quality carries the evidence; latency, cost and reliability do not (this artifact names why each one does not)",
+  "winner": "final run",
+  "ranking": [
+    {"rank": 1, "name": "final run", "overall_score": 1.0, "quality_score": 1.0},
+    {"rank": 2, "name": "first run", "overall_score": 0.95, "quality_score": 0.8}
+  ],
+  "candidates": {
+    "final run": {"cases_passed": 10, "cases_run": 10},
+    "first run": {"cases_passed": 8, "cases_run": 10}
+  }
+}"#,
+        );
         Fixture { root, repo }
     }
-
     fn config(&self) -> Config {
         Config::load(&self.repo, None)
     }
@@ -259,12 +278,18 @@ fn fixture_config(evidence: &Path) -> String {
       "scripts/build-audit-trail.py", ".github/workflows/*", "mcp/*", ".claude/agents/*"]
   }},
   "port": {{
-    "komun_defaults": {{
-      "project.name": "komun",
-      "containers.base_image": "agent-sandbox:komun",
-      "containers.broker.name": "rev-broker",
-      "artifacts.project_key": "proj-komun"
-    }},
+    "seams": ["project.name", "containers.base_image", "containers.broker.name",
+              "artifacts.project_key"],
+    "ancestors": [
+      {{"name": "komun",
+       "seams": {{"project.name": "komun",
+                 "containers.base_image": "agent-sandbox:komun",
+                 "containers.broker.name": "rev-broker",
+                 "artifacts.project_key": "proj-komun"}},
+       "review": {{"console.claude_command": "claude",
+                   "console.claude_flags": ["--agent", "orchestrator", "--permission-mode",
+                                            "acceptEdits"]}}}}
+    ],
     "language_specific_note": ["a fixture"]
   }},
   "console": {{
@@ -293,9 +318,7 @@ fn fixture_config(evidence: &Path) -> String {
       {{"label": "reviewer reads the journal and records a verdict", "kind": "role", "role": "reviewer"}},
       {{"label": "HUMAN CHECKPOINT 2 (release approval)", "kind": "human"}},
       {{"label": "project-manager closes", "kind": "role", "role": "project-manager"}}
-    ],
-    "komun_defaults": ["container", "claude_command", "ports", "evidence_dir", "briefs_dir", "ci_jobs",
-      "orchestration_steps", "claude_flags", "role_container_prefix", "checkpoint_fresh_minutes"]
+    ]
   }},
   "converted_steps": {{
     "prose-and-citation-conformance": {{
@@ -342,7 +365,26 @@ fn fixture_grant_map() -> String {
 }
 
 /// Render the app into a `TestBackend` and return the frame as text, row by row.
+///
+/// A screen is rendered through `ui::draw_overlay`: that is the drawing this console has always done
+/// for that screen, and it is why the frame tests written before the conversation screen existed keep
+/// asserting the same frames. `frame_text_drawn` below goes through the real `ui::draw`, which is what
+/// composes an overlay *in front of* the conversation.
 fn frame_text(app: &App, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            ui::draw_overlay(frame, area, app, app.view)
+        })
+        .expect("draw the frame");
+    buffer_text(terminal.backend().buffer())
+}
+
+/// Render the app the way the running console does: `ui::draw`, with the overlay composed in front of
+/// the conversation.
+fn frame_text_drawn(app: &App, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
@@ -426,7 +468,10 @@ fn named_session(id: &str) -> SessionEvidence {
 #[test]
 fn flow_screen_renders_every_lane_node_and_checkpoint() {
     let fixture = Fixture::build("flow-screen");
-    let app = fixture.app();
+    let mut app = fixture.app();
+    // The primary screen is the conversation now, so a test that asserts the FLOW screen's own
+    // drawing says which screen it is rendering. The assertion below is unchanged.
+    app.view = Screen::Flow;
     let text = frame_text(&app, 230, 60);
 
     assert!(text.contains("FLOW"), "the FLOW tab title is on screen");
@@ -505,7 +550,7 @@ fn every_flow_box_can_name_the_artifact_behind_it() {
 
     for index in 0..total {
         app.selection = index;
-        app.tab = Tab::Flow;
+        app.view = Screen::Flow;
         let text = frame_text(&app, 230, 60);
         let node = app
             .snapshot
@@ -539,7 +584,7 @@ fn every_flow_box_can_name_the_artifact_behind_it() {
 fn live_screen_renders_the_gate_table_and_the_checkpoint_card() {
     let fixture = Fixture::build("live-screen");
     let mut app = fixture.app_with_sessions(session_reading(vec![session(SESSION_A, 30)]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
 
     assert!(text.contains("LIVE"), "the LIVE tab title is on screen");
@@ -603,7 +648,7 @@ fn live_screen_renders_the_gate_table_and_the_checkpoint_card() {
 fn live_screen_reports_the_sources_and_their_age() {
     let fixture = Fixture::build("live-sources");
     let mut app = fixture.app();
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains(".memory/gate-audit.log"),
@@ -632,7 +677,7 @@ fn live_screen_reports_the_sources_and_their_age() {
 fn inspect_screen_renders_seams_mounts_grants_suites_and_candidates() {
     let fixture = Fixture::build("inspect-screen");
     let mut app = fixture.app();
-    app.tab = Tab::Inspect;
+    app.view = Screen::Inspect;
     let text = frame_text(&app, 230, 80);
 
     assert!(
@@ -685,6 +730,114 @@ fn inspect_screen_renders_seams_mounts_grants_suites_and_candidates() {
         "a conversion candidate is named"
     );
     assert!(text.contains("ADR-001"), "the ADR list is drawn");
+}
+
+#[test]
+fn the_scorecard_panel_shows_the_ranked_revisions_and_their_own_axes_clause() {
+    let fixture = Fixture::build("scorecard-panel");
+    let mut app = fixture.app();
+    app.view = Screen::Inspect;
+    // The seam table above grew by two rows: the console block now renders `claude_flags` and
+    // `checkpoint_fresh_minutes`, which the config records and the screen was previously not drawing
+    // at all. The document therefore reaches this panel two rows later than it used to, and the
+    // operator's own scroll is what reaches it -- the same mechanism the assertions below already
+    // use, and the title already announces the rows below the fold.
+    app.scroll = 2;
+    let text = frame_text(&app, 230, 80);
+
+    assert!(
+        text.contains("SCORECARD"),
+        "the scorecard section is drawn on the operator's own screen"
+    );
+    assert!(
+        text.contains("redteam-scorecard.json"),
+        "the panel names the artifact it read, and the reading carries its age"
+    );
+    assert!(
+        text.contains("#1 final run") && text.contains("cases 10/10"),
+        "the best-ranked revision and its case count are on screen\n{text}"
+    );
+
+    // The rest of the ranking sits below the fold at 80 rows, and INSPECT is a scrolled document:
+    // this is the operator's own mechanism, not a taller frame invented for the test. The offset is
+    // two rows deeper than it was because the seam table above gained two rows this screen now draws;
+    // these offsets are coupled to the document's length, which is worth decoupling later.
+    app.scroll = 6;
+    let scrolled = frame_text(&app, 230, 80);
+    assert!(
+        scrolled.contains("#2 first run") && scrolled.contains("cases 8/10"),
+        "the lower-ranked revision is reachable by scrolling, with its own count"
+    );
+    assert!(
+        scrolled.contains("winner: final run"),
+        "the winner the artifact names is printed"
+    );
+    assert!(
+        scrolled.contains("quality carries the evidence"),
+        "the artifact's OWN axes clause is printed, never one composed for it"
+    );
+    assert!(
+        scrolled.contains("latency, cost and reliability do not"),
+        "the clause naming the axes without evidence survives onto the glass"
+    );
+}
+
+#[test]
+fn inspect_announces_the_rows_below_the_fold_and_cannot_be_scrolled_into_a_void() {
+    let fixture = Fixture::build("inspect-budget");
+    let mut app = fixture.app();
+    app.view = Screen::Inspect;
+
+    // The document is longer than the panel here, so the title must say how much is below it.
+    let top = frame_text(&app, 230, 80);
+    assert!(
+        top.contains("more rows below"),
+        "rows that do not fit are announced in the title, not silently cut\n{top}"
+    );
+    assert!(
+        top.contains("row 1/"),
+        "the title says which row is at the top and how many there are"
+    );
+
+    // The defect this replaces: the offset used to walk past the end, so the panel went blank and
+    // read as though there were nothing more. Scrolled far past the end, the LAST row is still drawn.
+    app.scroll = 10_000;
+    let bottom = frame_text(&app, 230, 80);
+    assert!(
+        bottom.contains("quality carries the evidence"),
+        "the document's own last row is what a past-the-end scroll lands on"
+    );
+    // The count is exact, not merely self-consistent: at the bottom the last document row sits
+    // directly above the panel's bottom border, so the budget neither over-counts (which would leave
+    // blank content rows below the last line) nor under-counts (which would cut the tail off).
+    let rows: Vec<&str> = bottom.lines().map(str::trim_end).collect();
+    let last_content = rows
+        .iter()
+        .position(|row| row.contains("quality carries the evidence"))
+        .expect("the last document row was drawn");
+    assert!(
+        rows.get(last_content + 1)
+            .is_some_and(|row| row.trim_start().starts_with("└")),
+        "the last content row is immediately above the bottom border\n{here}",
+        here = rows
+            .iter()
+            .skip(last_content)
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        !bottom.contains("more rows below"),
+        "at the end of the document the title stops claiming there is more\n{bottom}"
+    );
+
+    // A document that fits says nothing about more rows: no budget was spent, so nothing to announce.
+    let tall = frame_text(&app, 230, 400);
+    assert!(
+        !tall.contains("more rows below"),
+        "a document that fits announces no hidden rows"
+    );
 }
 
 #[test]
@@ -787,6 +940,7 @@ fn a_second_brief_is_refused_while_a_run_is_in_flight() {
         session: SessionEvidence::not_read(),
         checkpoint_conflict: None,
         evaluated: true,
+        prompt: PromptTarget::default(),
     };
     let refused = actions::build(&config, ActionKind::Brief, "do a thing", guards);
     let reason = refused.expect_err("a second run is refused");
@@ -831,6 +985,7 @@ fn a_ruling_is_refused_when_no_checkpoint_is_open() {
             session: SessionEvidence::not_read(),
             checkpoint_conflict: None,
             evaluated: true,
+            prompt: PromptTarget::default(),
         },
     );
     let reason = refused.expect_err("a ruling with nothing to resume is refused");
@@ -844,7 +999,7 @@ fn a_ruling_is_refused_when_no_checkpoint_is_open() {
 fn a_checkpoint_ruling_is_built_and_confirmed_but_only_on_the_confirmation_key() {
     let fixture = Fixture::build("ruling-confirmed");
     let mut app = fixture.app_with_sessions(session_reading(vec![session(SESSION_A, 45)]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     // The card offers the ruling, so `e` opens the chooser, and `c` is the chooser's free-text row:
     // the same text box `e` opened on its own before the chooser existed.
@@ -887,7 +1042,7 @@ fn a_checkpoint_ruling_is_built_and_confirmed_but_only_on_the_confirmation_key()
 fn the_checkpoint_card_is_shown_on_the_live_tab_and_named_in_the_status() {
     let fixture = Fixture::build("card-on-live");
     let mut app = fixture.app();
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains("press e to write the ruling") || text.contains("ruling"),
@@ -907,17 +1062,20 @@ fn tabs_are_selected_by_key_and_the_header_names_all_three() {
     );
 
     press(&mut app, KeyCode::Char('2'));
-    assert_eq!(app.tab, Tab::Live);
+    assert_eq!(app.view, Screen::Live);
     let live = frame_text(&app, 200, 50);
     assert!(live.contains("CHECKPOINT CARD"));
 
     press(&mut app, KeyCode::Char('3'));
-    assert_eq!(app.tab, Tab::Inspect);
+    assert_eq!(app.view, Screen::Inspect);
     let inspect = frame_text(&app, 200, 50);
     assert!(inspect.contains("CONFIG SEAMS"), "{inspect}");
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.tab, Tab::Flow);
+    // Tab now cycles through four screens, not three: the CONVERSATION screen is one of them, so
+    // cycling on from INSPECT comes back to it rather than wrapping to FLOW. This is the one
+    // key-model assertion the conversation screen moves, and it moves because the screen exists.
+    assert_eq!(app.view, Screen::Conversation);
 }
 
 #[test]
@@ -990,16 +1148,20 @@ fn the_configured_container_and_scope_are_read_from_the_config_not_the_code() {
         "the five jobs are read from the workflow file"
     );
     assert!(
-        !config.at_komun_default("project.name"),
-        "the fixture departs from the recorded default for project.name"
+        !config.inherited("project.name"),
+        "the fixture departs from what the recorded ancestor shipped for project.name"
     );
     assert!(
-        config.console_at_default("container"),
-        "the console block lists its own keys as still Komun's"
+        config.inherited("console.claude_command"),
+        "a console value that still equals the ancestor's is reported as inherited"
     );
     assert!(
-        !config.console_at_default("not_a_console_key"),
-        "an unlisted key is not reported as a Komun default"
+        !config.inherited("console.container"),
+        "a console value the fixture re-pointed is NOT reported as inherited. This assertion is the          reverse of the one it replaces, and the reversal is the fix: that one asked list MEMBERSHIP,          so it answered \"still the reference's\" for a container the fixture had plainly changed --          a false reading, on the screen a reviewer trusts, that the change to a value comparison exposes"
+    );
+    assert!(
+        !config.console_inherited("not_a_console_key"),
+        "a key no ancestor records is not reported as inherited"
     );
 }
 
@@ -1030,7 +1192,7 @@ fn the_gate_servers_own_answer_is_parsed_or_reported_as_a_failure() {
 fn the_live_screen_says_why_the_gate_server_could_not_be_asked() {
     let fixture = Fixture::build("gate-server-unreachable");
     let mut app = fixture.app();
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains("allowlist"),
@@ -1158,7 +1320,7 @@ fn a_checkpoint_named_by_evidence_with_no_run_in_flight_is_not_announced_as_a_wa
         "the card names the session the command resumes"
     );
 
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains("STOPPED AT HUMAN CHECKPOINT 1"),
@@ -1268,7 +1430,7 @@ fn a_checkpoint_named_while_a_run_is_in_flight_reads_as_work_in_progress_and_ref
     );
     let mut app = App::new(config);
     app.snapshot = Snapshot::from_parts(app.config.clone(), probes);
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     assert!(
         app.snapshot.live.run.in_flight,
@@ -1413,7 +1575,7 @@ fn a_ruling_resumes_the_session_the_evidence_names_and_never_the_continue_flag()
         session(SESSION_B, 5),
         session(SESSION_A, 600),
     ]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = &app.snapshot.live.checkpoint;
     assert_eq!(card.state, CardState::Stopped);
@@ -1501,7 +1663,7 @@ fn a_ruling_is_refused_when_two_sessions_are_equally_recent() {
         session(SESSION_B, 5),
         session(SESSION_A, 20),
     ]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(card.state, CardState::Stopped);
@@ -1586,7 +1748,7 @@ fn a_ruling_is_refused_when_the_reads_name_different_sessions() {
         "{\"note\": \"stopped at human checkpoint 1 (plan approval)\"}\n",
     );
     let mut app = fixture.app_with_sessions(session_reading(vec![session(SESSION_B, 30)]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(card.state, CardState::Stopped);
@@ -1621,7 +1783,7 @@ fn the_card_shows_the_session_it_would_resume_and_the_read_that_named_it() {
         session(SESSION_A, 20),
         session(SESSION_B, 4_000),
     ]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = &app.snapshot.live.checkpoint;
     assert_eq!(card.state, CardState::Stopped);
@@ -1825,7 +1987,7 @@ fn a_foreign_evidence_transcript_cannot_name_this_runs_checkpoint() {
         ),
     );
     let mut app = app;
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = &app.snapshot.live.checkpoint;
     assert_eq!(card.state, CardState::Stopped);
@@ -1905,7 +2067,7 @@ fn an_unattributable_evidence_transcript_is_ignored_and_the_card_says_why() {
         session_reading(vec![session(SESSION_A, 30)]),
         transcript_unreadable(SESSION_A),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(
@@ -1999,7 +2161,7 @@ fn an_attributable_evidence_transcript_still_names_its_checkpoint() {
         session_reading(vec![session(SESSION_A, 30)]),
         transcript_unreadable(SESSION_A),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(card.state, CardState::Stopped);
@@ -2059,7 +2221,7 @@ fn a_journal_that_disagrees_with_the_runs_own_transcript_is_reported_not_resolve
             )],
         ),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(card.state, CardState::Stopped);
@@ -2250,6 +2412,20 @@ fn every_docker_exec_action_puts_its_options_before_the_container_name() {
                 session: named_session(SESSION_A),
                 checkpoint_conflict: None,
                 evaluated: true,
+                prompt: PromptTarget::default(),
+            },
+        ),
+        (
+            // The console's own conversation: this is the one case where the target is not empty,
+            // because the turn's `--session-id` comes from the mint the console made for it.
+            ActionKind::Prompt,
+            "a fixture prompt".to_string(),
+            Guards {
+                prompt: PromptTarget {
+                    session: None,
+                    minted: Some("11111111-2222-4333-8444-555555555555".to_string()),
+                },
+                ..Guards::default()
             },
         ),
     ];
@@ -2270,7 +2446,9 @@ fn every_docker_exec_action_puts_its_options_before_the_container_name() {
             .unwrap_or_else(|reason| panic!("{} must build: {reason}", kind.id()));
         let index = assert_docker_exec_grammar(&config, kind, &command.argv);
         let expected_command = match kind {
-            ActionKind::Brief | ActionKind::Ruling => config.console.claude_command.clone(),
+            ActionKind::Brief | ActionKind::Ruling | ActionKind::Prompt => {
+                config.console.claude_command.clone()
+            }
             _ => "python3".to_string(),
         };
         assert_eq!(
@@ -2414,7 +2592,7 @@ fn an_exited_action_stops_being_reported_as_running_and_its_exit_code_is_recorde
     );
 
     // The frame draws the same fact: the log pane's title drops the running count.
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         !text.contains("action(s) running"),
@@ -2518,7 +2696,7 @@ fn the_live_reading_and_the_card_refresh_themselves_without_the_operator_pressin
     );
 
     // The card is the current reading, not the one taken at startup.
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains("CHECKPOINT CARD") && text.contains("reading   :"),
@@ -2554,7 +2732,7 @@ fn set_rulings(repo: &Path, rulings: serde_json::Value) {
 /// An app on the LIVE tab at a checkpoint the card offers a ruling for.
 fn live_with_an_offered_ruling(fixture: &Fixture) -> App {
     let mut app = fixture.app_with_sessions(session_reading(vec![session(SESSION_A, 45)]));
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     assert!(
         app.ruling_offerable(),
         "the fixture offers a ruling: {}",
@@ -2815,13 +2993,17 @@ fn the_number_keys_still_switch_tabs_and_never_approve_or_halt() {
         !app.ruling_offerable(),
         "no session is named, so no ruling is offered as well"
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     press(&mut app, KeyCode::Char('1'));
-    assert_eq!(app.tab, Tab::Flow, "1 is FLOW with no ruling offered");
+    assert_eq!(app.view, Screen::Flow, "1 is FLOW with no ruling offered");
     press(&mut app, KeyCode::Char('2'));
-    assert_eq!(app.tab, Tab::Live, "2 is LIVE with no ruling offered");
+    assert_eq!(app.view, Screen::Live, "2 is LIVE with no ruling offered");
     press(&mut app, KeyCode::Char('3'));
-    assert_eq!(app.tab, Tab::Inspect, "3 is INSPECT with no ruling offered");
+    assert_eq!(
+        app.view,
+        Screen::Inspect,
+        "3 is INSPECT with no ruling offered"
+    );
     assert_eq!(
         app.mode_name(),
         "normal",
@@ -2832,11 +3014,15 @@ fn the_number_keys_still_switch_tabs_and_never_approve_or_halt() {
     // A ruling IS offered, on the LIVE tab: `1`/`2`/`3` are still the tabs. This is the accident the
     // split exists to prevent -- a run halted by a keypress meant for a screen.
     let fixture = Fixture::build("tabs-with-a-ruling-offered");
-    for (key, expected) in [('1', Tab::Flow), ('2', Tab::Live), ('3', Tab::Inspect)] {
+    for (key, expected) in [
+        ('1', Screen::Flow),
+        ('2', Screen::Live),
+        ('3', Screen::Inspect),
+    ] {
         let mut app = live_with_an_offered_ruling(&fixture);
         press(&mut app, KeyCode::Char(key));
         assert_eq!(
-            app.tab, expected,
+            app.view, expected,
             "`{key}` switches screens even with a ruling offered"
         );
         assert_eq!(
@@ -2856,9 +3042,9 @@ fn the_number_keys_still_switch_tabs_and_never_approve_or_halt() {
     assert_eq!(app.mode_name(), "choose", "`e` opens the chooser");
     press(&mut app, KeyCode::Char('1'));
     assert_eq!(
-        app.tab,
-        Tab::Live,
-        "the chooser's `1` is the chooser's, not a tab switch"
+        app.view,
+        Screen::Live,
+        "the chooser's `1` is the chooser's, not a screen switch"
     );
     assert!(
         !started_anything(&app),
@@ -3019,7 +3205,7 @@ fn live_at_checkpoint_2(fixture: &Fixture) -> App {
             )],
         ),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
     assert!(
         app.card().which.contains("HUMAN CHECKPOINT 2"),
         "the card reads checkpoint 2: {}",
@@ -3296,7 +3482,7 @@ fn a_closing_record_ends_the_run_and_names_no_checkpoint() {
             &[transcript_record(SESSION_A, "Nothing further to report.")],
         ),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert!(
@@ -3342,7 +3528,7 @@ fn a_closing_record_ends_the_run_and_names_no_checkpoint() {
 #[test]
 fn a_role_with_no_storage_write_tool_reads_as_not_observable_not_missing() {
     let fixture = Fixture::build("flow-role-without-a-journal");
-    let app = fixture.app();
+    let mut app = fixture.app();
 
     let lane_b = app
         .snapshot
@@ -3386,6 +3572,7 @@ fn a_role_with_no_storage_write_tool_reads_as_not_observable_not_missing() {
         node.provenance
     );
 
+    app.view = Screen::Flow;
     let text = frame_text(&app, 230, 60);
     assert!(
         text.contains("not observable in the storage journal"),
@@ -3421,7 +3608,7 @@ fn the_runs_standing_menu_offer_names_no_checkpoint_and_creates_no_disagreement(
             )],
         ),
     );
-    app.tab = Tab::Live;
+    app.view = Screen::Live;
 
     let card = app.snapshot.live.checkpoint.clone();
     assert_eq!(card.state, CardState::Stopped);
@@ -3454,5 +3641,968 @@ fn the_runs_standing_menu_offer_names_no_checkpoint_and_creates_no_disagreement(
     assert!(
         text.contains("STOPPED AT HUMAN CHECKPOINT 2"),
         "the journal's read is the one the card shows\n{text}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The console's own conversation: the send path, driven with a real child and a real stream.
+//
+// The child here is a shell script that prints the envelopes the CLI prints, so these tests exercise
+// `actions::start`, the reader threads, `drain_running`'s routing, `conversation::apply_line` and
+// `close_turn` for real rather than through a mock. Nothing here touches docker or the network.
+// ---------------------------------------------------------------------------------------------
+
+/// Start a throwaway turn directly, the way the confirmation screen starts a real one: the same
+/// `actions::start`, the same streamed pipes, and a shell script standing in for the CLI's stream.
+fn start_throwaway_turn(app: &mut App, prompt: &str, script: &str) {
+    let command = actions::Command {
+        kind: ActionKind::Prompt,
+        guards: Guards::default(),
+        value: prompt.to_string(),
+        argv: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
+        cwd: std::env::temp_dir(),
+        env: Vec::new(),
+        writes: Vec::new(),
+        note: Vec::new(),
+    };
+    let started = actions::start(&command).expect("the throwaway turn starts");
+    app.conversation.open_turn(prompt);
+    app.running.push(Running {
+        kind: started.kind,
+        label: started.label,
+        channels: started.channels,
+        child: started.child,
+        started: SystemTime::now(),
+    });
+}
+
+/// A turn's stream is the conversation's, and the console's own transcript is where it lands.
+#[test]
+fn a_turns_stream_lands_in_the_transcript_and_not_in_the_action_log() {
+    let fixture = Fixture::build("turn-stream");
+    let mut app = fixture.app();
+    let script = "printf '%s\\n' \
+        '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"22222222-3333-4444-8555-666666666666\",\"model\":\"claude-opus-5-5[1m]\",\"claude_code_version\":\"2.1.280\"}' \
+        '{\"type\":\"assistant\",\"uuid\":\"33333333-4444-4555-8666-777777777777\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from the run\"}]}}' \
+        '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"num_turns\":1,\"total_cost_usd\":0.02}'";
+    start_throwaway_turn(&mut app, "say hello", script);
+    let log = wait_for_the_actions_to_end(&mut app);
+
+    assert!(
+        app.conversation
+            .items
+            .iter()
+            .any(|item| item.kind == ItemKind::Agent && item.text == "hello from the run"),
+        "the run's own words are in the transcript: {:?}",
+        app.conversation.items
+    );
+    assert!(
+        !log.iter()
+            .any(|line| line.trim_start().starts_with("{\"type\":")),
+        "no raw envelope may be pasted into the action log: {log:?}"
+    );
+    // The session the run named is adopted, and the mint that opened the conversation is retired.
+    assert_eq!(
+        app.conversation.session.as_deref(),
+        Some("22222222-3333-4444-8555-666666666666")
+    );
+    assert_eq!(app.minted, None, "the run's own init names the session");
+    // The transcript says what it is: nothing has corroborated this yet.
+    assert_eq!(app.conversation.live(), 1);
+    assert_eq!(app.conversation.confirmed(), 0);
+    let turn = app.conversation.last_turn().expect("the turn was opened");
+    assert!(
+        !turn.is_error,
+        "the run reported success and the exit agreed"
+    );
+    assert_eq!(turn.num_turns, Some(1));
+    assert!(turn.ended.is_some());
+}
+
+/// A failed turn is drawn as a failure even when the exit status is what closed it.
+#[test]
+fn a_turn_whose_child_dies_opens_and_closes_its_own_turn() {
+    let fixture = Fixture::build("turn-dies");
+    let mut app = fixture.app();
+    start_throwaway_turn(&mut app, "say nothing", "exit 9");
+    wait_for_the_actions_to_end(&mut app);
+    let turn = app
+        .conversation
+        .last_turn()
+        .expect("a turn was opened for the child");
+    assert!(turn.ended.is_some(), "the exit closed the turn");
+    assert!(turn.is_error, "a child that died did not complete a turn");
+    assert!(
+        turn.error.as_deref().unwrap_or_default().contains("code 9"),
+        "the exit status is the turn's own reason: {:?}",
+        turn.error
+    );
+}
+
+#[test]
+fn an_empty_composer_is_refused_and_nothing_is_minted() {
+    let fixture = Fixture::build("composer-empty");
+    let mut app = fixture.app();
+    app.composer = "   \n ".to_string();
+    app.propose_prompt();
+    assert_eq!(app.status, "the prompt is empty; write it first");
+    assert_eq!(app.minted, None, "no id is minted for a prompt never sent");
+    assert!(app.conversation.items.is_empty());
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(
+        app.composer, "   \n ",
+        "the operator's text is not eaten by the refusal"
+    );
+}
+
+/// The first turn mints exactly one id, and the confirmation screen shows the id the turn will carry.
+#[test]
+fn a_prompt_mints_one_id_and_shows_it_before_anything_runs() {
+    let fixture = Fixture::build("prompt-mint");
+    let mut app = fixture.app();
+    app.composer = "run the fmt gate".to_string();
+    app.propose_prompt();
+    let minted = app.minted.clone().expect("a first turn mints an id");
+    assert!(
+        probe::uuid_token(&minted).is_some(),
+        "the mint is a uuid the CLI will accept: {minted}"
+    );
+    match &app.mode {
+        // The confirmation of a prompt is drawn in the composer box, not in the modal: the operator
+        // is looking there, and the box shows the same four things the modal shows.
+        Mode::PromptConfirm { command } => {
+            assert_eq!(command.kind, ActionKind::Prompt);
+            let id = command
+                .argv
+                .iter()
+                .position(|item| item == "--session-id")
+                .expect("the first turn carries --session-id");
+            assert_eq!(
+                command.argv.get(id + 1).map(String::as_str),
+                Some(minted.as_str()),
+                "the id on the confirmation screen is the id that will run"
+            );
+            assert!(
+                command
+                    .argv
+                    .windows(2)
+                    .any(|window| window == ["-p", "run the fmt gate"]),
+                "the prompt is one argv element, immediately after -p: {:?}",
+                command.argv
+            );
+            assert!(
+                command.argv.iter().any(|item| item == "stream-json"),
+                "the turn is streamed: {:?}",
+                command.argv
+            );
+            assert!(
+                command
+                    .guards
+                    .summary()
+                    .contains("prompt=<the console's own session target"),
+                "the confirmation says whose conversation this is: {}",
+                command.guards.summary()
+            );
+            // And the composer box draws it: the confirmation is where the operator is looking.
+            let text = frame_text(&app, 120, 40);
+            assert!(
+                text.contains("--session-id") && text.contains("about to run"),
+                "the composer box carries the exact command\n{text}"
+            );
+            assert!(
+                text.contains("press y (or Enter) to run it"),
+                "and the question\n{text}"
+            );
+        }
+        other => panic!("the prompt must be waiting for confirmation, not {other:?}"),
+    }
+    // Nothing has run, so no turn exists yet.
+    assert!(app.conversation.turns.is_empty());
+    assert!(app.conversation.items.is_empty());
+}
+
+/// A later turn resumes the id the run's own `init` named, and never by `--continue`.
+#[test]
+fn a_later_turn_resumes_the_session_by_id() {
+    let fixture = Fixture::build("prompt-resume");
+    let mut app = fixture.app();
+    app.conversation.session = Some("22222222-3333-4444-8555-666666666666".to_string());
+    app.composer = "and now run the tests".to_string();
+    app.propose_prompt();
+    assert_eq!(
+        app.minted, None,
+        "no id is minted for a conversation already named"
+    );
+    match &app.mode {
+        Mode::PromptConfirm { command } => {
+            assert!(
+                !command.argv.iter().any(|item| item == "--session-id"),
+                "a later turn resumes rather than mints: {:?}",
+                command.argv
+            );
+            let id = command
+                .argv
+                .iter()
+                .position(|item| item == "--resume")
+                .expect("a later turn resumes by id");
+            assert_eq!(
+                command.argv.get(id + 1).map(String::as_str),
+                Some("22222222-3333-4444-8555-666666666666")
+            );
+            assert!(
+                !command.argv.iter().any(|item| item == "--continue"),
+                "the console never resumes whichever session is newest: {:?}",
+                command.argv
+            );
+        }
+        other => panic!("the prompt must be waiting for confirmation, not {other:?}"),
+    }
+}
+
+/// A turn already running refuses a second one, and the refusal names the process and the session.
+#[test]
+fn a_turn_already_in_flight_refuses_a_second_one() {
+    let fixture = Fixture::build("prompt-in-flight");
+    let mut app = fixture.app();
+    app.conversation.session = Some("22222222-3333-4444-8555-666666666666".to_string());
+    start_throwaway_turn(&mut app, "the first turn", "sleep 2");
+    app.composer = "a second turn".to_string();
+    app.propose_prompt();
+
+    assert!(
+        app.status
+            .contains("this console's own turn is still running"),
+        "the refusal says a turn is running: {}",
+        app.status
+    );
+    assert!(
+        app.status.contains("second writer on session 22222222"),
+        "the refusal names the session it would double-write: {}",
+        app.status
+    );
+    assert!(app.status.contains("pid "), "the refusal names the pid");
+    assert_eq!(
+        app.composer, "a second turn",
+        "the text is kept for when the turn ends"
+    );
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "nothing reached a confirmation"
+    );
+    // Exactly one turn is in flight, and the second one did not open a turn of its own.
+    assert_eq!(app.actions_running(), 1);
+    assert_eq!(app.conversation.turns.len(), 1);
+}
+
+/// A refusal from the command builder is passed through unchanged, and opens no turn.
+#[test]
+fn a_build_refusal_is_passed_through_and_opens_no_turn() {
+    let fixture = Fixture::build("prompt-build-refusal");
+    let mut app = fixture.app();
+    // A run in flight in the container is `Brief`'s refusal, and `Prompt` carries the same wording.
+    app.snapshot.live.run.in_flight = true;
+    app.composer = "run the fmt gate".to_string();
+    app.propose_prompt();
+    assert!(
+        app.status.contains("already in flight in this container"),
+        "the builder's own reason, unchanged: {}",
+        app.status
+    );
+    assert!(
+        app.status
+            .contains("Approve the checkpoint or wait for the run to end."),
+        "the refusal keeps its own second sentence: {}",
+        app.status
+    );
+    assert!(app.conversation.turns.is_empty(), "no turn was opened");
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+/// The eight actions are the menu, and the prompt action's preview shows its exact argv.
+#[test]
+fn the_prompt_action_is_offered_in_the_menu_and_previewed_in_a_dry_run() {
+    let fixture = Fixture::build("prompt-menu");
+    let mut app = fixture.app();
+    press(&mut app, KeyCode::Char('a'));
+    let text = frame_text(&app, 200, 50);
+    assert!(
+        text.contains("Prompt the orchestrator (a turn of this conversation)"),
+        "the menu offers the conversation:\n{text}"
+    );
+    let dry = actions::dry_run_one(&fixture.config(), "prompt", Some("say hello"))
+        .expect("the prompt action is a known id");
+    // A dry run has no conversation, so it mints an id for the preview alone and says so; without
+    // that mint the one action whose shape *is* the minted id could never be previewed.
+    assert!(
+        dry.contains("--session-id"),
+        "the preview shows the minted id the turn would carry: {dry}"
+    );
+    assert!(
+        dry.contains("--output-format stream-json"),
+        "the preview shows the streaming flags: {dry}"
+    );
+    assert!(
+        dry.contains("--include-partial-messages"),
+        "the preview shows that tokens arrive as they are written: {dry}"
+    );
+    assert!(
+        dry.contains("minted for this preview alone; nothing was sent"),
+        "the preview does not claim a turn ran: {dry}"
+    );
+    assert!(
+        dry.contains("-p 'say hello'"),
+        "the prompt is one argv element in the preview: {dry}"
+    );
+    // And the same preview through the all-actions door, which is the mode the README names.
+    let all = actions::dry_run_all(&fixture.config());
+    assert!(
+        all.contains("action   : prompt (Prompt the orchestrator"),
+        "--dry-run-actions covers the new action:\n{all}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The CONVERSATION screen: the composer's key model, the width discipline, and the size matrix.
+//
+// The roadmap's own defect is what the matrix below exists to close: the suite rendered only at
+// 230x60 and 200x50, so nothing had ever exercised the width an operator actually has. Every size
+// here is one an operator can be sitting at.
+// ---------------------------------------------------------------------------------------------
+
+/// The sizes a screen must be readable at, smallest first. 80x24 is the design target.
+const SIZES: [(u16, u16); 6] = [
+    (80, 24),
+    (86, 38),
+    (100, 30),
+    (120, 40),
+    (160, 50),
+    (230, 60),
+];
+
+/// `q` quits on the CONVERSATION screen and is a letter in the composer.
+///
+/// This is the class of bug that types into somebody's work: a key that means one thing while the
+/// operator is writing and another thing while they are not.
+#[test]
+fn q_quits_the_console_and_is_a_letter_in_the_composer() {
+    let fixture = Fixture::build("composer-q");
+    let mut app = fixture.app();
+
+    // On the CONVERSATION screen with no composer open, `q` is still the quit key.
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.quit, "`q` still quits the console");
+    app.quit = false;
+
+    // With the composer open it is a character, and nothing else happens.
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.mode_name(), "composer", "`i` focuses the composer");
+    typed(&mut app, "quit looking at the log");
+    assert_eq!(app.composer, "quit looking at the log");
+    assert!(!app.quit, "a `q` in the composer must not quit the console");
+    assert_eq!(
+        app.view,
+        Screen::Conversation,
+        "and must not switch screens"
+    );
+    assert!(app.running.is_empty(), "and must start nothing");
+
+    // Esc leaves the composer and keeps the text; `q` quits again.
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode_name(), "normal");
+    assert_eq!(app.composer, "quit looking at the log", "the text is kept");
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.quit, "`q` quits again once the composer is closed");
+}
+
+/// A prompt costs `i`, the text, `Enter`, `y` -- and nothing runs before the `y`.
+#[test]
+fn a_prompt_costs_four_keystrokes_and_none_of_them_reaches_a_command_alone() {
+    let fixture = Fixture::build("composer-send");
+    let mut app = fixture.app();
+    assert!(matches!(app.mode, Mode::Normal));
+
+    press(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "run the fmt gate");
+    assert!(
+        app.running.is_empty() && app.conversation.turns.is_empty(),
+        "typing a prompt starts nothing"
+    );
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode_name(),
+        "prompt-confirm",
+        "Enter reviews the exact command"
+    );
+    assert!(
+        app.running.is_empty(),
+        "reviewing the command starts nothing: the review is not the run"
+    );
+    let text = frame_text(&app, 120, 40);
+    assert!(
+        text.contains("run the fmt gate") && text.contains("about to run"),
+        "the box shows the text and the command it becomes\n{text}"
+    );
+
+    // `n` goes back to the composer with the text intact, and still nothing ran.
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.mode_name(), "composer");
+    assert_eq!(app.composer, "run the fmt gate");
+    assert!(app.running.is_empty(), "a cancelled prompt starts nothing");
+
+    // `Enter`, then `y`: this is the only pair that starts anything, and it is the pair that does.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode_name(), "prompt-confirm");
+    press(&mut app, KeyCode::Char('y'));
+    assert_eq!(app.actions_running(), 1, "`y` is what runs it");
+    assert_eq!(
+        app.conversation.turns.len(),
+        1,
+        "the turn is opened in the transcript"
+    );
+    assert_eq!(
+        app.conversation.items.front().map(|item| item.kind),
+        Some(ItemKind::You),
+        "and the first item is the operator's own words"
+    );
+}
+
+/// The composer is one line at every width, and the transcript keeps its rows.
+///
+/// Three assertions per size, the ones the roadmap names: the composer is on the last rows, the
+/// transcript has at least eight rows, and a long item wraps rather than being cut mid-word.
+#[test]
+fn the_conversation_screen_is_readable_at_every_size_an_operator_has() {
+    let fixture = Fixture::build("conversation-sizes");
+    for (width, height) in SIZES {
+        let mut app = fixture.app();
+        app.conversation
+            .note("a console line that is here so the pane has something in it");
+        app.composer = "a prompt the operator is part-way through writing".to_string();
+
+        let text = frame_text_drawn(&app, width, height);
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            rows.len(),
+            height as usize,
+            "{width}x{height}: every row is drawn"
+        );
+
+        // The transcript pane is drawn, and keeps at least eight rows of its own.
+        let transcript_title = rows
+            .iter()
+            .position(|row| row.contains("TRANSCRIPT -- this console's own buffer"))
+            .unwrap_or_else(|| panic!("{width}x{height}: no transcript title\n{text}"));
+        let transcript_end = rows[transcript_title..]
+            .iter()
+            .position(|row| row.starts_with('└'))
+            .map(|offset| transcript_title + offset)
+            .unwrap_or_else(|| {
+                panic!("{width}x{height}: the transcript pane is not closed\n{text}")
+            });
+        assert!(
+            transcript_end - transcript_title > 8,
+            "{width}x{height}: the transcript pane kept its eight rows\n{text}"
+        );
+
+        // The composer is on the last rows, under the transcript, and its line is drawn in it.
+        let composer_title = rows
+            .iter()
+            .position(|row| row.contains("COMPOSER"))
+            .unwrap_or_else(|| panic!("{width}x{height}: no composer box\n{text}"));
+        assert!(
+            composer_title > transcript_end,
+            "{width}x{height}: the composer is under the transcript\n{text}"
+        );
+        let composer_end = rows[composer_title..]
+            .iter()
+            .position(|row| row.starts_with('└'))
+            .map(|offset| composer_title + offset)
+            .unwrap_or_else(|| panic!("{width}x{height}: the composer is not closed\n{text}"));
+        // The footer is three rows: its top border, the checkpoint line and the key line. So at most
+        // three rows sit under the composer's own closing border.
+        assert!(
+            height as usize - composer_end - 1 <= 3,
+            "{width}x{height}: the composer is on the last rows\n{text}"
+        );
+        assert!(
+            rows[composer_title + 1].contains("a prompt the operator is part-way through"),
+            "{width}x{height}: the composer's own line is drawn\n{text}"
+        );
+
+        // The header names the screen the operator is looking at, at every width.
+        assert!(
+            rows[0].contains("CONVERSATION") && rows[0].contains("1 FLOW"),
+            "{width}x{height}: the header names the screens\n{text}"
+        );
+    }
+}
+
+/// A long item wraps at the pane's width rather than being cut mid-word, at every size.
+#[test]
+fn a_long_item_wraps_at_every_width_rather_than_being_cut_mid_word() {
+    let fixture = Fixture::build("conversation-wrap");
+    // One long run of words, with no word longer than the narrowest pane's text column -- and long
+    // enough to wrap even at the widest terminal in the matrix.
+    let sentence =
+        "the orchestrator read the journals and reported that every gate the config names \
+                    has an artifact behind it and none of them is stale, and then it said the same \
+                    thing again in more words, because a transcript is not a summary and a row that \
+                    stops mid-sentence is a row that hid the rest of it";
+    for (width, height) in SIZES {
+        let mut app = fixture.app();
+        app.conversation.push(agent_item(sentence));
+        let text = frame_text_drawn(&app, width, height);
+        let rows: Vec<&str> = text.lines().collect();
+        let title = rows
+            .iter()
+            .position(|row| row.contains("TRANSCRIPT -- this console's own buffer"))
+            .unwrap_or_else(|| panic!("{width}x{height}: no transcript title\n{text}"));
+        let end = rows[title..]
+            .iter()
+            .position(|row| row.starts_with('└'))
+            .map(|offset| title + offset)
+            .unwrap_or_else(|| {
+                panic!("{width}x{height}: the transcript pane is not closed\n{text}")
+            });
+        // The pane's own rows, with the border characters and the indentation trimmed off: the item's
+        // text, however many rows it took.
+        let body: Vec<String> = rows[title + 1..end]
+            .iter()
+            .map(|row| row.trim_matches(|character| character == '│' || character == ' '))
+            .filter(|row| !row.is_empty())
+            .map(str::to_string)
+            .collect();
+        assert!(
+            body.len() > 1,
+            "{width}x{height}: the sentence wrapped onto more than one row\n{text}"
+        );
+        // The last word is on screen: a sentence that wrapped was not silently dropped, and nothing
+        // was cut inside a word (no row ends in the middle of one -- which shows up as the pane's
+        // border, or in a clipped word, as an ellipsis).
+        let joined = body.join(" ");
+        assert!(
+            joined.contains("is stale"),
+            "{width}x{height}: the sentence's own last words are drawn\n{text}"
+        );
+        for row in &body {
+            assert!(
+                !row.contains('…'),
+                "{width}x{height}: a word was clipped instead of wrapped: {row:?}"
+            );
+        }
+    }
+}
+
+/// An agent item to put in a transcript, without going through the parser.
+fn agent_item(text: &str) -> agentic_console::conversation::Item {
+    agentic_console::conversation::Item {
+        key: None,
+        uuid: None,
+        kind: ItemKind::Agent,
+        state: agentic_console::conversation::ItemState::Live,
+        text: text.to_string(),
+        at: SystemTime::now(),
+    }
+}
+
+/// Below 24 rows the key line is dropped loudly, not clipped silently.
+#[test]
+fn the_key_line_is_dropped_loudly_when_the_terminal_is_short() {
+    let fixture = Fixture::build("short-terminal");
+    let app = fixture.app();
+
+    let tall = frame_text_drawn(&app, 120, 40);
+    assert!(
+        tall.contains("q quit  i compose"),
+        "at a normal height the key line is drawn\n{tall}"
+    );
+
+    let short = frame_text_drawn(&app, 100, 20);
+    assert!(
+        !short.contains("q quit  i compose"),
+        "at 20 rows there is no room for the key line\n{short}"
+    );
+    assert!(
+        short.contains("the key line is hidden at this height"),
+        "and the row it would have used says so\n{short}"
+    );
+}
+
+/// An overlay is drawn in front of the conversation, one keystroke away in both directions, and the
+/// conversation is still underneath it.
+#[test]
+fn an_overlay_is_drawn_in_front_of_the_conversation_and_esc_brings_it_back() {
+    let fixture = Fixture::build("overlay");
+    let mut app = fixture.app();
+    app.conversation.note("a line in the console's own buffer");
+
+    // `2` opens LIVE in front of the conversation.
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(app.view, Screen::Live);
+    let overlaid = frame_text_drawn(&app, 120, 40);
+    assert!(
+        overlaid.contains("an overlay in front of the CONVERSATION screen"),
+        "the overlay's own title row says what it is\n{overlaid}"
+    );
+    assert!(
+        overlaid.contains("CHECKPOINT CARD"),
+        "the LIVE screen is drawn by its own code\n{overlaid}"
+    );
+
+    // Esc closes it, and the conversation is what the frame shows.
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, Screen::Conversation, "Esc closes the overlay");
+    let back = frame_text_drawn(&app, 120, 40);
+    assert!(
+        back.contains("TRANSCRIPT -- this console's own buffer"),
+        "and the conversation is the screen again\n{back}"
+    );
+    assert!(
+        !back.contains("an overlay in front of the CONVERSATION screen"),
+        "the overlay is gone\n{back}"
+    );
+
+    // All three are still one keystroke away, and Tab cycles through all four screens.
+    for (key, expected) in [
+        ('1', Screen::Flow),
+        ('2', Screen::Live),
+        ('3', Screen::Inspect),
+    ] {
+        press(&mut app, KeyCode::Char(key));
+        assert_eq!(app.view, expected, "`{key}` opens {expected:?}");
+    }
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view, Screen::Conversation, "Tab wraps to CONVERSATION");
+}
+
+/// The composer has the keyboard only where it is offered: on an overlay, `i` is not a character.
+#[test]
+fn the_composer_is_offered_on_the_conversation_screen_only() {
+    let fixture = Fixture::build("composer-scope");
+    let mut app = fixture.app();
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(
+        app.mode_name(),
+        "normal",
+        "on an overlay, `i` opens no composer and is not text"
+    );
+    assert!(app.composer.is_empty(), "and writes nothing");
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(
+        app.mode_name(),
+        "composer",
+        "on CONVERSATION it opens the composer"
+    );
+}
+
+/// An overlay is opaque: nothing the conversation screen wrote may show through it.
+///
+/// This is not cosmetic. A `Paragraph` writes only the cells it has text for, so before this was
+/// pinned, the conversation's own words and the composer's draft appeared *inside* the FLOW, LIVE and
+/// INSPECT frames -- text those screens never wrote, read as if they had. The smear is invisible to a
+/// test that renders an overlay into an empty backend, which is exactly why this one renders it over a
+/// conversation that has something in it.
+#[test]
+fn an_overlay_hides_the_conversation_it_is_drawn_over() {
+    let fixture = Fixture::build("overlay-opaque");
+    let mut app = fixture.app();
+    app.conversation
+        .note("a sentence only the conversation pane writes");
+    app.composer = "and a draft only the composer carries".to_string();
+
+    let conversation = frame_text_drawn(&app, 200, 50);
+    assert!(
+        conversation.contains("a sentence only the conversation pane writes"),
+        "the conversation screen does write both, or this test proves nothing\n{conversation}"
+    );
+    assert!(
+        conversation.contains("and a draft only the composer carries"),
+        "the composer's draft is on the glass\n{conversation}"
+    );
+
+    for key in ['1', '2', '3'] {
+        press(&mut app, KeyCode::Char(key));
+        let text = frame_text_drawn(&app, 200, 50);
+        assert!(
+            !text.contains("a sentence only the conversation pane writes"),
+            "the overlay opened by `{key}` shows the conversation's own words through it\n{text}"
+        );
+        assert!(
+            !text.contains("and a draft only the composer carries"),
+            "the overlay opened by `{key}` shows the composer's draft through it\n{text}"
+        );
+        assert!(
+            text.contains("an overlay in front of the CONVERSATION screen"),
+            "and it is the overlay that is drawn\n{text}"
+        );
+        press(&mut app, KeyCode::Esc);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reconciliation: what the console may claim about its own transcript once the run's own record
+// has been read back. Each test here is a way the console could lie instead, pinned.
+// ---------------------------------------------------------------------------------------------
+
+/// A turn's `init` names the session; a later read of that session's own record is what confirms the
+/// lines the console drew from it.
+#[test]
+fn a_live_line_is_confirmed_against_the_runs_own_record() {
+    let fixture = Fixture::build("reconcile-own-record");
+    let mut app = fixture.app();
+    let session = "22222222-3333-4444-8555-666666666666";
+    let message = "33333333-4444-4555-8666-777777777777";
+    let script = format!(
+        "printf '%s\\n' \
+        '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{session}\",\"model\":\"claude-opus-5-5[1m]\"}}' \
+        '{{\"type\":\"assistant\",\"uuid\":\"{message}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"hello from the run\"}}]}}}}' \
+        '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}}'"
+    );
+    start_throwaway_turn(&mut app, "say hello", &script);
+    wait_for_the_actions_to_end(&mut app);
+    assert_eq!(
+        app.conversation.session.as_deref(),
+        Some(session),
+        "the turn's `init` adopted the session the run itself named"
+    );
+    assert_eq!(
+        app.conversation.live(),
+        1,
+        "the assistant message is live until the run's own record says otherwise"
+    );
+
+    app.snapshot.live.conversation_transcript = Reading::ok(
+        Some(probe::TranscriptRead {
+            session_id: session.to_string(),
+            path: format!("/root/.claude/projects/-workspace/{session}.jsonl"),
+            lines: vec![format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{message}\",\"message\":{{\"content\":[]}}}}"
+            )],
+        }),
+        format!("docker exec agent-console-m1 tail -c 262144 /root/.claude/projects/-workspace/{session}.jsonl"),
+        SystemTime::now(),
+    );
+
+    assert_eq!(
+        app.reconcile(),
+        1,
+        "one item was found in the run's own record"
+    );
+    assert_eq!(app.conversation.live(), 0);
+    assert_eq!(app.conversation.confirmed(), 1);
+    let said = app
+        .conversation
+        .items
+        .back()
+        .expect("the console says what it did")
+        .text
+        .clone();
+    assert!(
+        said.contains("reconciled: 1 line(s) found in") && said.contains(session),
+        "the line names the session it was confirmed against: {said}"
+    );
+
+    // Confirming is not a thing that happens again on every refresh: the item is already confirmed, so
+    // a second read finds nothing new to say.
+    let before = app.conversation.items.len();
+    assert_eq!(app.reconcile(), 0);
+    assert_eq!(
+        app.conversation.items.len(),
+        before,
+        "a second read of the same record adds no line"
+    );
+}
+
+/// A read that names another session is not an answer about this run.
+#[test]
+fn a_read_that_names_another_session_confirms_nothing() {
+    let fixture = Fixture::build("reconcile-other-session");
+    let mut app = fixture.app();
+    let ours = "22222222-3333-4444-8555-666666666666";
+    let theirs = "99999999-8888-4777-8666-555555555555";
+    let message = "33333333-4444-4555-8666-777777777777";
+    let script = format!(
+        "printf '%s\\n' \
+        '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{ours}\"}}' \
+        '{{\"type\":\"assistant\",\"uuid\":\"{message}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"hello from the run\"}}]}}}}' \
+        '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}}'"
+    );
+    start_throwaway_turn(&mut app, "say hello", &script);
+    wait_for_the_actions_to_end(&mut app);
+
+    app.snapshot.live.conversation_transcript = Reading::ok(
+        Some(probe::TranscriptRead {
+            session_id: theirs.to_string(),
+            path: format!("/root/.claude/projects/-workspace/{theirs}.jsonl"),
+            // The uuid is present, and it would match: the point is that this record speaks for
+            // another session, so it may not confirm this console's line.
+            lines: vec![format!("{{\"type\":\"assistant\",\"uuid\":\"{message}\"}}")],
+        }),
+        "docker exec agent-console-m1 tail -c 262144 /root/.claude/projects/-workspace/other.jsonl",
+        SystemTime::now(),
+    );
+
+    assert_eq!(
+        app.reconcile(),
+        0,
+        "another session's record confirms nothing"
+    );
+    assert_eq!(app.conversation.live(), 1, "the line stays live");
+    let said = app.conversation.items.back().unwrap().text.clone();
+    assert!(
+        said.contains(theirs) && said.contains(ours),
+        "and the refusal names both sessions, so the operator can see which read was refused: {said}"
+    );
+}
+
+/// A read that failed confirms nothing, and the console says so rather than leaving the operator to
+/// guess why every line is still live.
+#[test]
+fn a_failed_read_confirms_nothing_and_says_so_once() {
+    let fixture = Fixture::build("reconcile-failed-read");
+    let mut app = fixture.app();
+    let session = "22222222-3333-4444-8555-666666666666";
+    let message = "33333333-4444-4555-8666-777777777777";
+    let script = format!(
+        "printf '%s\\n' \
+        '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{session}\"}}' \
+        '{{\"type\":\"assistant\",\"uuid\":\"{message}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"hello from the run\"}}]}}}}' \
+        '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}}'"
+    );
+    start_throwaway_turn(&mut app, "say hello", &script);
+    wait_for_the_actions_to_end(&mut app);
+
+    app.snapshot.live.conversation_transcript = Reading::failed(
+        None,
+        "docker exec agent-console-m1 tail -c 262144 /root/.claude/projects/-workspace/x.jsonl",
+        SystemTime::now(),
+        "the container is not running",
+    );
+
+    assert_eq!(app.reconcile(), 0);
+    assert_eq!(app.conversation.live(), 1, "the line stays live");
+    let after_first = app.conversation.items.len();
+    let said = app.conversation.items.back().unwrap().text.clone();
+    assert!(
+        said.contains("could not be read") && said.contains("the container is not running"),
+        "the failure is reported with its reason: {said}"
+    );
+    // The condition has not changed, so it is not said again: a note per refresh would bury the
+    // transcript the operator is trying to read.
+    app.reconcile();
+    assert_eq!(
+        app.conversation.items.len(),
+        after_first,
+        "the same failure is not repeated on every refresh"
+    );
+}
+
+/// The read is a bounded tail, and a bounded tail cannot say a line is absent from the record: it can
+/// only say the line is not in the window it read.
+#[test]
+fn a_bounded_tail_that_matches_nothing_reports_the_window_it_read() {
+    let fixture = Fixture::build("reconcile-bounded-tail");
+    let mut app = fixture.app();
+    let session = "22222222-3333-4444-8555-666666666666";
+    let message = "33333333-4444-4555-8666-777777777777";
+    let script = format!(
+        "printf '%s\\n' \
+        '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{session}\"}}' \
+        '{{\"type\":\"assistant\",\"uuid\":\"{message}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"hello from the run\"}}]}}}}' \
+        '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}}'"
+    );
+    start_throwaway_turn(&mut app, "say hello", &script);
+    wait_for_the_actions_to_end(&mut app);
+
+    // A read that returned a whole budget's worth of bytes: `tail -c N` answers with the whole file
+    // only when the file is smaller than N, so this is what a truncated read looks like from here.
+    let full = "x".repeat(probe::TRANSCRIPT_TAIL_BYTES);
+    app.snapshot.live.conversation_transcript = Reading::ok(
+        Some(probe::TranscriptRead {
+            session_id: session.to_string(),
+            path: format!("/root/.claude/projects/-workspace/{session}.jsonl"),
+            lines: vec![full],
+        }),
+        "docker exec agent-console-m1 tail -c 262144 /root/.claude/projects/-workspace/x.jsonl",
+        SystemTime::now(),
+    );
+    assert_eq!(app.reconcile(), 0, "nothing matched in the window");
+    let said = app.conversation.items.back().unwrap().text.clone();
+    assert!(
+        said.contains("bounded at") && said.contains("not in this read at all"),
+        "the line reports the window, not the item: {said}"
+    );
+    assert!(
+        !said.contains("unverified") && !said.contains("not found"),
+        "and never claims the record lacks the line: {said}"
+    );
+
+    // The contrast: a read that returned less than its budget saw the whole record, and then the
+    // console may say the record does not hold the line.
+    app.snapshot.live.conversation_transcript = Reading::ok(
+        Some(probe::TranscriptRead {
+            session_id: session.to_string(),
+            path: format!("/root/.claude/projects/-workspace/{session}.jsonl"),
+            lines: vec!["{\"type\":\"assistant\",\"uuid\":\"some-other-message\"}".to_string()],
+        }),
+        "docker exec agent-console-m1 tail -c 262144 /root/.claude/projects/-workspace/x.jsonl",
+        SystemTime::now(),
+    );
+    assert_eq!(app.reconcile(), 0);
+    let said = app.conversation.items.back().unwrap().text.clone();
+    assert!(
+        said.contains("the whole record was read"),
+        "a complete read may say the record does not hold the line: {said}"
+    );
+}
+
+/// The buffer line is on every screen, not only CONVERSATION: an operator reading the LIVE overlay
+/// still reads what the console's own transcript holds, and against which session.
+///
+/// One line, one wording, built by `Conversation::header_line`, so the pane's title, the header and
+/// `--dump` cannot drift apart.
+#[test]
+fn the_header_carries_the_buffer_line_on_every_screen() {
+    let fixture = Fixture::build("header-buffer-line");
+    let mut app = fixture.app();
+    app.conversation.session = Some("22222222-3333-4444-8555-666666666666".to_string());
+    app.conversation.note("a line the console wrote");
+
+    // Nothing drawn yet: the console has not been asked anything, and `0 item(s)` on four screens is
+    // noise the operator learns to read past.
+    let mut fresh = fixture.app();
+    fresh.view = Screen::Live;
+    let empty = frame_text_drawn(&fresh, 200, 50);
+    assert!(
+        !empty.contains("buffer:"),
+        "an empty buffer is not announced on the overlay\n{empty}"
+    );
+
+    for (key, screen) in [
+        ('1', Screen::Flow),
+        ('2', Screen::Live),
+        ('3', Screen::Inspect),
+    ] {
+        press(&mut app, KeyCode::Char(key));
+        assert_eq!(app.view, screen);
+        let text = frame_text_drawn(&app, 200, 50);
+        assert!(
+            text.contains("buffer:"),
+            "{screen:?}: the buffer line is on this screen too\n{text}"
+        );
+        assert!(
+            text.contains("1 item(s) -- 0 confirmed against 22222222"),
+            "{screen:?}: and it is `header_line`, with the session it is counted against\n{text}"
+        );
+    }
+
+    press(&mut app, KeyCode::Esc);
+    let text = frame_text_drawn(&app, 200, 50);
+    assert!(
+        text.contains("buffer:") && text.contains("1 item(s)"),
+        "and on the conversation screen, where it has always been\n{text}"
     );
 }

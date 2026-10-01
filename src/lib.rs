@@ -18,6 +18,7 @@ pub mod cache;
 pub mod checkpoint;
 pub mod collector;
 pub mod config;
+pub mod conversation;
 pub mod dump;
 pub mod iso;
 pub mod journal;
@@ -26,6 +27,7 @@ pub mod probe;
 pub mod state;
 pub mod timings;
 pub mod ui;
+pub mod uuid;
 
 /// The usage text, printed by `--help` and quoted in the README.
 pub const USAGE: &str = "\
@@ -42,5 +44,9 @@ usage: agentic-console [options]
   --dry-run-actions      print every action's exact command instead of running it, exit 0
   --dry-run-action ID    print one action's command; combine with --value
   --value TEXT           the value the action would use (with --dry-run-action)
+  --prompt TEXT          send one prompt to the orchestrator and print the turn as the run's own
+                         stream-json lines, then this console's own transcript; the same argv the
+                         composer builds, and no confirmation screen, because a command line is
+                         already the operator's decision
   -h, --help             this text
 ";

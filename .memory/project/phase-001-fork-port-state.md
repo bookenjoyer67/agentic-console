@@ -25,12 +25,15 @@ governance, which was not**.
 
 1. **Six of the seven role definitions.** They are the reference project's rules under this
    repository's name. Their `AGENTS.md:NNN` citations point past the end of this repository's
-   `AGENTS.md` (174 lines), and they enforce rules for a schema, a frontend and a wasm package that do
+   `AGENTS.md` (166 lines as committed), and they enforce rules for a schema, a frontend and a wasm
+   package that do
    not exist here. Each one is recorded as a seam below.
 2. **A project-id split.** Settled for the config, `CLAUDE.md` and the corpus by
    `decisions/decision-001-project-id.md`; the grant map and the role files are still behind.
 3. **The console ports.** `console.ports` says gate 8101, storage 8102, retrieval 8103. The servers
-   listen on 8003, 8001 and 8002, and no launcher publishes a port to the host. `src/actions.rs`
+   listen on 8003, 8001 and 8002, and no launcher publishes a port to the host. The console's own
+   embedded fallback carries 8003/8001/8002 as well, so the configured ports are the outlier rather
+   than one side of an ambiguity. `src/actions.rs`
    derives the gate selftest's argv from those config ports, so the disagreement decides behaviour.
 4. **The container name.** `console.container` says `agent-console-m1`. `sandbox/run-agent.sh` derives
    `agent-$SLUG` from the workspace directory, giving `agent-agentic-console`. One fact, two sources.
