@@ -173,13 +173,13 @@ def test_edge_case_off_by_one_citation_is_reported(tmp_path: Path) -> None:
 
         Which pointer lands one line away?
 
-        - Cite the role list (`scripts/run-agent.sh:34` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
+        - Cite the role list (`scripts/run-agent.sh:35` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
         """)
     _, report, _ = run_checker(tmp_path, [fixture])
     drift = [f for f in report["inputs"][0]["violations"] if f["code"] == "CIT-LINE-DRIFT"]
     assert len(drift) == 1
-    assert drift[0]["citation"] == "scripts/run-agent.sh:34"
-    assert drift[0]["found_at"] == 33, "VALID_ROLES sits on line 33 of the launcher"
+    assert drift[0]["citation"] == "scripts/run-agent.sh:35"
+    assert drift[0]["found_at"] == 34, "VALID_ROLES sits on line 34 of the launcher"
 
 
 # --- The limitation the step classification names ------------------------------------------------
@@ -263,7 +263,7 @@ def test_clean_input_passes_and_corrupt_input_fails(tmp_path: Path) -> None:
 
         What does this probe document prove?
 
-        - Cite the launcher's role list (`scripts/run-agent.sh:33` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
+        - Cite the launcher's role list (`scripts/run-agent.sh:34` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
         - Cite the role table (`scripts/README.md:31` `Policy grants workspace writes and no memory write`).
         """)
     status, report, _ = run_checker(tmp_path, [clean], output=tmp_path / "clean.json")
@@ -278,7 +278,7 @@ def test_clean_input_passes_and_corrupt_input_fails(tmp_path: Path) -> None:
 
         - Cite a bare location with no literal (docs/DOC-STYLE.md:40).
         - Should keep the memory layer plain files, because that is the decision of record.
-        - Cite a drifted line (`scripts/run-agent.sh:34` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
+        - Cite a drifted line (`scripts/run-agent.sh:35` `VALID_ROLES="orchestrator planner implementer tester reviewer project-manager researcher"`).
         - Cite a literal that is absent (`docs/DOC-STYLE.md:21` `this literal appears in no file at all`).
         - Cite a missing file (`docs/NO-SUCH-FILE.md:1` `absent`).
         """)
