@@ -1203,3 +1203,39 @@ def test_every_role_is_defined_in_a_definition() -> None:
         f"{ungoverned} carry gate tools or an autonomy level but have no entry in "
         f"{_rel(POLICY)}, so nothing scopes them"
     )
+
+
+
+def test_engine_creates_the_container_the_console_watches() -> None:
+    """The engine's own name resolution answers `console.container`, and AGENT_NAME still overrides it.
+
+    Two sources for that one fact is how a console ends up watching a container nobody started: it reads
+    `console.container`, while the engine derived a name from the workspace, so a first run showed a dark
+    screen and no error. This asserts the resolution the ENGINE uses — invoked, not reimplemented — and the
+    documented override, which is the way two worktrees run side by side.
+    """
+    import os
+    import subprocess
+
+    engine = REPO / "sandbox" / "run-agent.sh"
+    if not engine.is_file():
+        pytest.skip("this tree has no engine launcher")
+    expected = agentic_config.get("console.container")
+    assert expected, "console.container is not set in agentic.config.json"
+    base_env = {**os.environ, "REPO": str(REPO)}
+
+    def resolve(extra: dict[str, str] | None = None) -> str:
+        done = subprocess.run(
+            ["bash", str(engine), "--print-container-name"],
+            cwd=str(REPO), env={**base_env, **(extra or {})},
+            capture_output=True, text=True, check=False,
+        )
+        assert done.returncode == 0, f"the engine could not resolve a name: {done.stderr.strip()}"
+        return done.stdout.strip()
+
+    assert resolve() == expected, (
+        f"the engine would create {resolve()!r} while the console watches {expected!r}"
+    )
+    assert resolve({"AGENT_NAME": "agent-check"}) == "agent-check", (
+        "an explicit AGENT_NAME must still win, or two worktrees collide on one name"
+    )

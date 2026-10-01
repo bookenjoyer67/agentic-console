@@ -12,10 +12,10 @@
 # different REPO values (e.g. two git worktrees of the same repo); each container
 # sees its own checkout as /workspace and shares nothing but the broker.
 #
-#   ~/agentic-console/sandbox/run-agent.sh                      # repo         -> agent-agentic-console
-#   REPO=$HOME/agentic-console ~/agentic-console/sandbox/run-agent.sh  # repo  -> agent-agentic-console
-#   REPO=$HOME/worktree-b $HOME/agentic-console/sandbox/run-agent.sh
-#   AGENT_NAME=my-name REPO=... run-agent.sh                    # override the container name
+#   ~/agentic-console/sandbox/run-agent.sh                      # container named by the seam table
+#   REPO=$HOME/agentic-console ~/agentic-console/sandbox/run-agent.sh  # same name, any workspace
+#   REPO=$HOME/worktree-b $HOME/agentic-console/sandbox/run-agent.sh   # two worktrees: pass AGENT_NAME
+#   AGENT_NAME=n REPO=... run-agent.sh  # override the name;  --print-container-name  # print it only
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,9 +26,9 @@ IMAGE="${IMAGE:-agent-sandbox:console-m1}"
 BROKER_IMAGE="${BROKER_IMAGE:-console-sandbox-broker:local}"
 BROKER_NAME="${BROKER_NAME:-console-broker}"
 
-# container name derived from the workspace, so two worktrees never collide
-SLUG="$(basename "$REPO")"
-AGENT_NAME="${AGENT_NAME:-agent-$SLUG}"
+# cfg <key> <current-value>: the seam table's value, or <current-value> when the kit is absent; AGENT_NAME wins.
+cfg() { local v=""; [ -f "$SCRIPT_DIR/../scripts/agentic_config.py" ] && v="$(python3 "$SCRIPT_DIR/../scripts/agentic_config.py" --get "$1" --default "$2" 2>/dev/null || true)"; printf '%s' "${v:-$2}"; }
+SLUG="$(basename "$REPO")"; AGENT_NAME="${AGENT_NAME:-$(cfg console.container "agent-$SLUG")}"; case "${1:-}" in --print-container-name) printf '%s\n' "$AGENT_NAME"; exit 0 ;; esac
 # cargo build cache: one per workspace. Two agents sharing one target dir would
 # serialise on cargo's build lock, which is the opposite of parallel sessions.
 TARGET_VOL="${TARGET_VOL:-$SLUG-cargo-target}"
