@@ -82,6 +82,7 @@ pub fn render(config: &Config, snapshot: &Snapshot) -> String {
     for warning in &snapshot.warnings {
         out.push_str(&format!("WARNING     : {warning}\n"));
     }
+    render_runtime(&mut out, snapshot);
     render_flow(&mut out, snapshot);
     render_live(&mut out, snapshot);
     render_inspect(&mut out, snapshot);
@@ -111,6 +112,34 @@ pub fn render_conversation(out: &mut String, conversation: &Conversation) {
             out.push_str(&format!(
                 "  [{:?}/{:?}] {}\n",
                 item.kind, item.state, item.text
+            ));
+        }
+    }
+}
+
+/// The RUNTIME panel as plain text: the whole point of this section is that a pipe reads exactly
+/// what the screen draws -- every prerequisite, its observed state, the read behind it, and the exact
+/// command a human would run to fix it. Nothing in it is executed, and the section says so.
+fn render_runtime(out: &mut String, snapshot: &Snapshot) {
+    let runtime = &snapshot.runtime;
+    out.push_str("\n== RUNTIME: is this machine ready? (read-only; nothing here is run) ==\n");
+    out.push_str(&format!("  {}\n", runtime.summary));
+    for row in &runtime.rows {
+        out.push_str(&format!(
+            "  {} {:<24} {:<14} {}\n",
+            row.light.glyph(),
+            row.label,
+            row.state,
+            row.detail
+        ));
+        if !row.key.is_empty() {
+            out.push_str(&format!("        key    : {}\n", row.key));
+        }
+        out.push_str(&format!("        source : {} ({})\n", row.source, row.age));
+        if !row.fix.is_empty() {
+            out.push_str(&format!(
+                "        fix    : {}   (shown, never run from here)\n",
+                row.fix
             ));
         }
     }

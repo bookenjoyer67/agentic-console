@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod flow;
 pub mod inspect;
 pub mod live;
+pub mod runtime;
 pub mod style;
 
 use std::io::stdout;
@@ -41,9 +42,10 @@ pub const KEY_REFERENCE: &[(&str, &str)] = &[
          itself, Esc closes the composer and keeps the text, Ctrl-U clears the line",
     ),
     (
-        "1 / 2 / 3, Tab, Shift-Tab",
-        "the CONVERSATION screen and the FLOW, LIVE and INSPECT overlays. An overlay is a screen \
-         drawn in front of the conversation, and any of them is one keystroke away",
+        "1 / 2 / 3 / 4, Tab, Shift-Tab",
+        "the CONVERSATION screen and the FLOW, LIVE, RUNTIME and INSPECT overlays. An overlay is a \
+         screen drawn in front of the conversation, and any of them is one keystroke away. RUNTIME \
+         is a reading: it shows each missing prerequisite's exact fix command and runs none of them",
     ),
     (
         "Esc (on an overlay)",
@@ -237,6 +239,7 @@ pub fn draw_overlay(frame: &mut Frame, area: Rect, app: &App, screen: Screen) {
     match screen {
         Screen::Flow => flow::draw(frame, chunks[1], app),
         Screen::Live => live::draw(frame, chunks[1], app),
+        Screen::Runtime => runtime::draw(frame, chunks[1], app),
         Screen::Inspect => inspect::draw(frame, chunks[1], app),
         Screen::Conversation => {}
     }
@@ -282,6 +285,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, screen: Screen) {
         Screen::Conversation,
         Screen::Flow,
         Screen::Live,
+        Screen::Runtime,
         Screen::Inspect,
     ] {
         let title = format!(" {} ", candidate.tab_label());
@@ -416,8 +420,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             "{status}   [a read is in flight: the readings on screen are the last completed read]"
         );
     }
-    let keys =
-        "q quit  i compose  Esc back  1/2/3 screens  j/k select  r refresh  a actions  Enter \
+    let keys = "q quit  i compose  Esc back  1-4 screens  j/k select  r refresh  a actions  Enter \
                 approve  e chooser  t brief  L log  ? help";
     // Below 24 rows the key line is dropped **loudly**: the row it would have used says that it is
     // hidden, and where to find it. Silent clipping is a lie the operator cannot detect -- the same

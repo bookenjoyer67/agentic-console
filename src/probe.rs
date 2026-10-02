@@ -131,23 +131,7 @@ pub fn docker_ps(now: SystemTime) -> Reading<Vec<ContainerRow>> {
     ];
     let source = argv.join(" ");
     match run(&argv, None) {
-        Ok(out) if out.ok() => {
-            let rows = out
-                .stdout
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| {
-                    let mut parts = line.split('\t');
-                    ContainerRow {
-                        name: parts.next().unwrap_or_default().to_string(),
-                        image: parts.next().unwrap_or_default().to_string(),
-                        status: parts.next().unwrap_or_default().to_string(),
-                        ports: parts.next().unwrap_or_default().to_string(),
-                    }
-                })
-                .collect();
-            Reading::ok(rows, source, now)
-        }
+        Ok(out) if out.ok() => Reading::ok(parse_container_table(&out.stdout), source, now),
         Ok(out) => Reading::failed(
             Vec::new(),
             source,
@@ -161,6 +145,124 @@ pub fn docker_ps(now: SystemTime) -> Reading<Vec<ContainerRow>> {
         ),
         Err(error) => Reading::failed(Vec::new(), source, now, error),
     }
+}
+
+/// One container row's four fields, from a `docker ps` line formatted as
+/// `{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}`.
+///
+/// A line with fewer fields is still one row: a missing field reads empty rather than making the row
+/// disappear, so a container docker printed is never silently dropped from the reading.
+pub fn parse_container_table(stdout: &str) -> Vec<ContainerRow> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.split('\t');
+            ContainerRow {
+                name: parts.next().unwrap_or_default().to_string(),
+                image: parts.next().unwrap_or_default().to_string(),
+                status: parts.next().unwrap_or_default().to_string(),
+                ports: parts.next().unwrap_or_default().to_string(),
+            }
+        })
+        .collect()
+}
+
+/// `docker ps -a`: every container, running or exited, and the state docker reports for it.
+///
+/// This is the read that tells an **exited** container apart from an **absent** one. [`docker_ps`]
+/// lists only the running ones, so a watched container can be "not running" for two different
+/// reasons -- it stopped, or it was never created -- and only this read says which. The console must
+/// not read the second as the first: a container that exists but does nothing is the incident this
+/// view exists to make visible, and it is named by its own status rather than by a boolean.
+pub fn docker_ps_all(now: SystemTime) -> Reading<Vec<ContainerRow>> {
+    let argv = vec![
+        "docker".to_string(),
+        "ps".to_string(),
+        "-a".to_string(),
+        "--no-trunc".to_string(),
+        "--format".to_string(),
+        "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}".to_string(),
+    ];
+    let source = argv.join(" ");
+    match run(&argv, None) {
+        Ok(out) if out.ok() => Reading::ok(parse_container_table(&out.stdout), source, now),
+        Ok(out) => Reading::failed(Vec::new(), source, now, short_stderr(&out.stderr, 200)),
+        Err(error) => Reading::failed(Vec::new(), source, now, error),
+    }
+}
+
+/// `docker images --no-trunc --format '{{.Repository}}:{{.Tag}}'`: every image tag on the host.
+///
+/// The tags are read exactly as docker prints them, because a configured image is matched against
+/// them by string: a layer built under another name is not this image, and the panel must not blur
+/// the two.
+pub fn docker_images(now: SystemTime) -> Reading<Vec<String>> {
+    let argv = vec![
+        "docker".to_string(),
+        "images".to_string(),
+        "--no-trunc".to_string(),
+        "--format".to_string(),
+        "{{.Repository}}:{{.Tag}}".to_string(),
+    ];
+    let source = argv.join(" ");
+    match run(&argv, None) {
+        Ok(out) if out.ok() => Reading::ok(non_empty_lines(&out.stdout), source, now),
+        Ok(out) => Reading::failed(Vec::new(), source, now, short_stderr(&out.stderr, 200)),
+        Err(error) => Reading::failed(Vec::new(), source, now, error),
+    }
+}
+
+/// `docker network ls --format '{{.Name}}'`: every network on the host.
+pub fn docker_networks(now: SystemTime) -> Reading<Vec<String>> {
+    let argv = vec![
+        "docker".to_string(),
+        "network".to_string(),
+        "ls".to_string(),
+        "--format".to_string(),
+        "{{.Name}}".to_string(),
+    ];
+    let source = argv.join(" ");
+    match run(&argv, None) {
+        Ok(out) if out.ok() => Reading::ok(non_empty_lines(&out.stdout), source, now),
+        Ok(out) => Reading::failed(Vec::new(), source, now, short_stderr(&out.stderr, 200)),
+        Err(error) => Reading::failed(Vec::new(), source, now, error),
+    }
+}
+
+/// `docker version --format '{{.Server.Version}}'`: whether the daemon answers at all, and what it is.
+///
+/// The version string is the daemon's own answer, so it is evidence the daemon is up rather than a
+/// boolean this console decided. A daemon that does not answer is a failed reading carrying docker's
+/// own words, and never a version invented to fill the row.
+pub fn docker_daemon(now: SystemTime) -> Reading<String> {
+    let argv = vec![
+        "docker".to_string(),
+        "version".to_string(),
+        "--format".to_string(),
+        "{{.Server.Version}}".to_string(),
+    ];
+    let source = argv.join(" ");
+    match run(&argv, None) {
+        Ok(out) if out.ok() => Reading::ok(out.stdout.trim().to_string(), source, now),
+        Ok(out) => Reading::failed(String::new(), source, now, short_stderr(&out.stderr, 200)),
+        Err(error) => Reading::failed(String::new(), source, now, error),
+    }
+}
+
+/// The non-empty, trimmed lines of a command's stdout, in order.
+fn non_empty_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A command's stderr, trimmed and clipped, as a failed reading's error sentence.
+fn short_stderr(text: &str, limit: usize) -> String {
+    text.trim().chars().take(limit).collect()
 }
 
 /// One process inside the container, from `ps`.

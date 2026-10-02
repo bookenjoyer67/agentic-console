@@ -163,9 +163,10 @@ fn a_cached_answer_carries_the_time_it_was_read_not_the_time_it_was_served() {
     );
     assert_eq!(
         cache.served_from_cache(),
-        // 19, not 18: the probe population gained `scorecards`, and this invariant is about every
-        // probe in it being answered from memory, so the count moves with the population.
-        19,
+        // The RUNTIME panel added four docker reads (docker_containers, docker_images,
+        // docker_networks, docker_daemon); this invariant is about every probe in the population
+        // being answered from memory, so the count moves with the population.
+        23,
         "every probe is inside its TTL and was served from memory: the second collect reads nothing"
     );
 }
@@ -364,8 +365,8 @@ fn r_asks_for_a_collect_that_no_ttl_may_serve_from_cache() {
     );
     assert_eq!(
         cache.served_from_cache(),
-        // 19, not 18: `scorecards` joined the probe population (see the note above).
-        19,
+        // 23: the population includes the four RUNTIME docker reads (see the note above).
+        23,
         "every probe was answered from memory"
     );
 

@@ -50,6 +50,9 @@ pub enum Screen {
     Conversation,
     Flow,
     Live,
+    /// The RUNTIME panel: whether this machine actually has what the config names. A reading only —
+    /// every missing prerequisite shows the exact command that would fix it, and none is run here.
+    Runtime,
     Inspect,
 }
 
@@ -60,6 +63,7 @@ impl Screen {
             Screen::Conversation => "CONVERSATION -- the transcript and the composer",
             Screen::Flow => "1 FLOW -- the map with live lights",
             Screen::Live => "2 LIVE -- what is happening right now",
+            Screen::Runtime => "4 RUNTIME -- is this machine ready?",
             Screen::Inspect => "3 INSPECT -- the machinery",
         }
     }
@@ -78,6 +82,7 @@ impl Screen {
             Screen::Conversation => "CONVERSATION",
             Screen::Flow => "1 FLOW",
             Screen::Live => "2 LIVE",
+            Screen::Runtime => "4 RUNTIME",
             Screen::Inspect => "3 INSPECT",
         }
     }
@@ -86,7 +91,8 @@ impl Screen {
         match self {
             Screen::Conversation => Screen::Flow,
             Screen::Flow => Screen::Live,
-            Screen::Live => Screen::Inspect,
+            Screen::Live => Screen::Runtime,
+            Screen::Runtime => Screen::Inspect,
             Screen::Inspect => Screen::Conversation,
         }
     }
@@ -96,7 +102,8 @@ impl Screen {
             Screen::Conversation => Screen::Inspect,
             Screen::Flow => Screen::Conversation,
             Screen::Live => Screen::Flow,
-            Screen::Inspect => Screen::Live,
+            Screen::Runtime => Screen::Live,
+            Screen::Inspect => Screen::Runtime,
         }
     }
 }
@@ -873,6 +880,7 @@ impl App {
             KeyCode::Char('1') => self.view = Screen::Flow,
             KeyCode::Char('2') => self.view = Screen::Live,
             KeyCode::Char('3') => self.view = Screen::Inspect,
+            KeyCode::Char('4') => self.view = Screen::Runtime,
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('L') => self.show_log = !self.show_log,
             KeyCode::Char('a') => {
@@ -907,13 +915,13 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
-        if self.view == Screen::Inspect {
-            // The document is scrolled, and `j`/`k` walk its offset. The offset is NOT clamped here:
-            // the exact end of a wrapped document needs the panel's width and height, which only the
-            // render path knows, and a bound guessed at key time can be too small -- a too-small bound
-            // puts the tail of the document out of reach, which is worse than an offset that runs a
-            // little past the end. The renderer clamps to the exact last row instead, so the panel
-            // never goes blank and every row stays reachable.
+        if self.view == Screen::Inspect || self.view == Screen::Runtime {
+            // The document (or the RUNTIME panel) is scrolled, and `j`/`k` walk its offset. The offset
+            // is NOT clamped here: the exact end of a wrapped document needs the panel's width and
+            // height, which only the render path knows, and a bound guessed at key time can be too
+            // small -- a too-small bound puts the tail of the document out of reach, which is worse
+            // than an offset that runs a little past the end. The renderer clamps to the exact last
+            // row instead, so the panel never goes blank and every row stays reachable.
             let next = self.scroll as i32 + delta;
             self.scroll = next.max(0) as usize;
             return;

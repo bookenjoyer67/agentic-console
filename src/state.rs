@@ -332,6 +332,15 @@ pub struct InspectView {
 pub struct Probes {
     pub at: SystemTime,
     pub docker_ps: Reading<Vec<ContainerRow>>,
+    /// `docker ps -a`: every container, running or exited. The read that names a container's observed
+    /// state, so an exited one is never flattened into the same "not running" as an absent one.
+    pub docker_containers: Reading<Vec<ContainerRow>>,
+    /// `docker images`: every image tag on the host, matched against the configured images by string.
+    pub docker_images: Reading<Vec<String>>,
+    /// `docker network ls`: every network on the host.
+    pub docker_networks: Reading<Vec<String>>,
+    /// `docker version`: whether the daemon answers at all, with the version it reported.
+    pub docker_daemon: Reading<String>,
     pub container_ps: Reading<Vec<ProcRow>>,
     pub ports: Reading<Vec<(u16, bool)>>,
     pub gate_journal: Reading<Vec<GateEntry>>,
@@ -397,6 +406,12 @@ pub struct Grants {
 /// The probe names. These are the keys `console_probe_cadence.probes` in the config uses, so the
 /// cadence table, the cache and `--probe-timings` cannot drift apart.
 pub const P_DOCKER_PS: &str = "docker_ps";
+/// The RUNTIME panel's four docker reads: every container, every image tag, every network, and
+/// whether the daemon answers. Each is a `docker` call that only observes.
+pub const P_DOCKER_CONTAINERS: &str = "docker_containers";
+pub const P_DOCKER_IMAGES: &str = "docker_images";
+pub const P_DOCKER_NETWORKS: &str = "docker_networks";
+pub const P_DOCKER_DAEMON: &str = "docker_daemon";
 pub const P_CONTAINER_PS: &str = "container_ps";
 pub const P_PORTS: &str = "ports";
 pub const P_GATE_JOURNAL: &str = "gate_journal";
@@ -427,6 +442,10 @@ pub const P_SESSIONS: &str = "sessions";
 /// The probe names, in the order `--probe-timings` prints them.
 pub const PROBE_NAMES: &[&str] = &[
     P_DOCKER_PS,
+    P_DOCKER_CONTAINERS,
+    P_DOCKER_IMAGES,
+    P_DOCKER_NETWORKS,
+    P_DOCKER_DAEMON,
     P_CONTAINER_PS,
     P_PORTS,
     P_SESSIONS,
@@ -455,6 +474,10 @@ pub const PROBE_NAMES: &[&str] = &[
 /// taken in between.
 pub struct ProbeCache {
     pub docker_ps: Cached<Vec<ContainerRow>>,
+    pub docker_containers: Cached<Vec<ContainerRow>>,
+    pub docker_images: Cached<Vec<String>>,
+    pub docker_networks: Cached<Vec<String>>,
+    pub docker_daemon: Cached<String>,
     pub container_ps: Cached<Vec<ProcRow>>,
     pub ports: Cached<Vec<(u16, bool)>>,
     pub sessions: Cached<Vec<probe::SessionFile>>,
@@ -481,6 +504,13 @@ impl ProbeCache {
     pub fn new(cfg: &Config) -> ProbeCache {
         ProbeCache {
             docker_ps: Cached::new(P_DOCKER_PS, cache::ttl(cfg, P_DOCKER_PS)),
+            docker_containers: Cached::new(
+                P_DOCKER_CONTAINERS,
+                cache::ttl(cfg, P_DOCKER_CONTAINERS),
+            ),
+            docker_images: Cached::new(P_DOCKER_IMAGES, cache::ttl(cfg, P_DOCKER_IMAGES)),
+            docker_networks: Cached::new(P_DOCKER_NETWORKS, cache::ttl(cfg, P_DOCKER_NETWORKS)),
+            docker_daemon: Cached::new(P_DOCKER_DAEMON, cache::ttl(cfg, P_DOCKER_DAEMON)),
             container_ps: Cached::new(P_CONTAINER_PS, cache::ttl(cfg, P_CONTAINER_PS)),
             ports: Cached::new(P_PORTS, cache::ttl(cfg, P_PORTS)),
             sessions: Cached::new(P_SESSIONS, cache::ttl(cfg, P_SESSIONS)),
@@ -518,6 +548,10 @@ impl ProbeCache {
     pub fn timings(&self) -> Vec<ProbeTiming> {
         vec![
             self.docker_ps.timing(),
+            self.docker_containers.timing(),
+            self.docker_images.timing(),
+            self.docker_networks.timing(),
+            self.docker_daemon.timing(),
             self.container_ps.timing(),
             self.ports.timing(),
             self.sessions.timing(),
@@ -564,6 +598,9 @@ pub struct Snapshot {
     pub flow: FlowView,
     pub live: LiveView,
     pub inspect: InspectView,
+    /// The RUNTIME panel: whether this machine actually has what the config names, and the exact
+    /// command each missing prerequisite would need. Read-only; nothing here is executed.
+    pub runtime: RuntimeView,
     pub warnings: Vec<String>,
 }
 
@@ -573,6 +610,10 @@ impl Probes {
         Probes {
             at,
             docker_ps: Reading::failed(Vec::new(), "docker ps", at, "not probed"),
+            docker_containers: Reading::failed(Vec::new(), "docker ps -a", at, "not probed"),
+            docker_images: Reading::failed(Vec::new(), "docker images", at, "not probed"),
+            docker_networks: Reading::failed(Vec::new(), "docker network ls", at, "not probed"),
+            docker_daemon: Reading::failed(String::new(), "docker version", at, "not probed"),
             container_ps: Reading::failed(Vec::new(), "docker exec ps", at, "not probed"),
             ports: Reading::failed(Vec::new(), "docker exec tcp probe", at, "not probed"),
             gate_journal: Reading::failed(
@@ -837,12 +878,14 @@ impl Snapshot {
         let flow = build_flow(&config, &probes);
         let live = build_live(&config, &probes);
         let inspect = build_inspect(&config, &probes);
+        let runtime = build_runtime(&config, &probes);
         Snapshot {
             config,
             read_at,
             flow,
             live,
             inspect,
+            runtime,
             warnings,
         }
     }
@@ -885,6 +928,20 @@ pub fn collect_probes_with(
     ];
 
     let docker_ps = cache.docker_ps.get("", forced, at, || probe::docker_ps(at));
+    // The RUNTIME panel's four docker reads. Each answers a question about the host, not about a
+    // container, so each is cached under the empty key: one answer per host, kept to its cadence.
+    let docker_containers = cache
+        .docker_containers
+        .get("", forced, at, || probe::docker_ps_all(at));
+    let docker_images = cache
+        .docker_images
+        .get("", forced, at, || probe::docker_images(at));
+    let docker_networks = cache
+        .docker_networks
+        .get("", forced, at, || probe::docker_networks(at));
+    let docker_daemon = cache
+        .docker_daemon
+        .get("", forced, at, || probe::docker_daemon(at));
     let container_ps = cache.container_ps.get(&container, forced, at, || {
         probe::container_ps(&container, at)
     });
@@ -1004,6 +1061,10 @@ pub fn collect_probes_with(
     let mut probes = Probes {
         at,
         docker_ps,
+        docker_containers,
+        docker_images,
+        docker_networks,
+        docker_daemon,
         container_ps,
         ports: ports_reading,
         gate_journal,
@@ -2249,6 +2310,417 @@ fn build_live(cfg: &Config, probes: &Probes) -> LiveView {
     }
 }
 
+// --- RUNTIME -----------------------------------------------------------------------------------
+
+/// One prerequisite the RUNTIME panel reports on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeRow {
+    /// What the row is, in plain words: `docker daemon`, `base image`, `MCP server gate`.
+    pub label: String,
+    /// The config key the row reads, or `""` when the row is not config-backed.
+    pub key: String,
+    pub light: Light,
+    /// What was actually observed: `running`, `exited`, `absent`, `listening`, `answering`,
+    /// `unreadable` or `refused`. A word, never a boolean -- an exited container is not flattened
+    /// into the same "not running" as one that was never created.
+    pub state: String,
+    /// The sentence beside the state: the observed status, or why it could not be read.
+    pub detail: String,
+    /// The exact command a human would run to fix it, printed and never executed here. Empty when
+    /// nothing is missing.
+    pub fix: String,
+    /// The read this row rests on.
+    pub source: String,
+    /// The age of that read.
+    pub age: String,
+}
+
+/// The RUNTIME screen's model: every prerequisite, its observed state, and the fix it would need.
+#[derive(Clone, Debug)]
+pub struct RuntimeView {
+    pub rows: Vec<RuntimeRow>,
+    /// The one-line answer to "is this machine ready?", counted from the rows above.
+    pub summary: String,
+}
+
+/// How a down MCP server is brought back up. The gate server has its own entrypoint; storage and
+/// retrieval are started together by the repository's own script, which also selects the embedding
+/// model the repository measured against -- starting the retrieval server by hand yields a worse
+/// result, so the panel names the script rather than a plausible one-liner.
+enum McpFix {
+    Gate,
+    Script,
+}
+
+/// Build the RUNTIME view: one row per prerequisite the config names, each carrying the state the
+/// machine actually reported and the exact command that would fix it.
+///
+/// This function reads; it runs nothing. A read that failed is a worded row, never a green tick and
+/// never a default, and a missing row's fix is a string on the screen -- the wizard, not this panel,
+/// is where a command would be executed.
+fn build_runtime(cfg: &Config, probes: &Probes) -> RuntimeView {
+    let at = probes.at;
+    let mut rows: Vec<RuntimeRow> = Vec::new();
+
+    // 1. The daemon, first: every other docker read below fails with it, and its own error is the
+    // reason the rest are unreadable.
+    let daemon_age = iso::age_text(probes.docker_daemon.at, at);
+    rows.push(match &probes.docker_daemon.error {
+        Some(error) => RuntimeRow {
+            label: "docker daemon".to_string(),
+            key: String::new(),
+            light: Light::Unknown,
+            state: "no reply".to_string(),
+            detail: format!("the daemon did not answer: {error}"),
+            fix: "sudo systemctl start docker".to_string(),
+            source: probes.docker_daemon.source.clone(),
+            age: daemon_age,
+        },
+        None => RuntimeRow {
+            label: "docker daemon".to_string(),
+            key: String::new(),
+            light: Light::Ok,
+            state: "answering".to_string(),
+            detail: format!("server {}", probes.docker_daemon.value),
+            fix: String::new(),
+            source: probes.docker_daemon.source.clone(),
+            age: daemon_age,
+        },
+    });
+
+    // 2. The two images the config names, each with the build command this repository documents.
+    for (key, label, build) in [
+        (
+            "containers.base_image",
+            "base image",
+            "docker build -t {image} .",
+        ),
+        (
+            "containers.tools_image",
+            "tools image",
+            "docker build -f sandbox/Dockerfile.m3 -t {image} .",
+        ),
+    ] {
+        rows.push(image_row(cfg, probes, key, label, build));
+    }
+
+    // 3. The credential broker, 4. the internal network, 5. the agent container.
+    rows.push(container_row(
+        cfg,
+        probes,
+        "containers.broker.name",
+        "broker container",
+    ));
+    rows.push(network_row(
+        cfg,
+        probes,
+        "containers.networks.internal",
+        "internal network",
+    ));
+    rows.push(container_row(
+        cfg,
+        probes,
+        "console.container",
+        "agent container",
+    ));
+
+    // 6. The three MCP servers, on the ports the config names, probed inside the agent container.
+    rows.push(mcp_row(
+        cfg,
+        probes,
+        "gate",
+        cfg.console.gate_port,
+        McpFix::Gate,
+    ));
+    rows.push(mcp_row(
+        cfg,
+        probes,
+        "storage",
+        cfg.console.storage_port,
+        McpFix::Script,
+    ));
+    rows.push(mcp_row(
+        cfg,
+        probes,
+        "retrieval",
+        cfg.console.retrieval_port,
+        McpFix::Script,
+    ));
+
+    let summary = runtime_summary(&rows);
+    RuntimeView { rows, summary }
+}
+
+/// The one-line answer, counted from the rows: nothing is called ready unless every row was read and
+/// every read found its prerequisite present.
+fn runtime_summary(rows: &[RuntimeRow]) -> String {
+    let total = rows.len();
+    let ok = rows.iter().filter(|row| row.light == Light::Ok).count();
+    let missing = rows
+        .iter()
+        .filter(|row| row.light == Light::Missing)
+        .count();
+    let refused = rows.iter().filter(|row| row.light == Light::Fail).count();
+    let unread = rows
+        .iter()
+        .filter(|row| row.light == Light::Unknown)
+        .count();
+    if missing > 0 || refused > 0 {
+        format!(
+            "NOT READY -- {missing} missing, {refused} refused, {ok} of {total} observed present"
+        )
+    } else if unread > 0 {
+        format!("PARTLY READABLE -- {ok} of {total} observed present, {unread} could not be read")
+    } else {
+        format!("READY -- all {total} prerequisites observed present")
+    }
+}
+
+/// The value of a required config key, or the refusal sentence when it is absent or empty.
+///
+/// One function for every RUNTIME row: an empty or missing key becomes the same sentence every other
+/// refusal uses, never a blank and never a default that names a runtime the user did not choose.
+fn config_name(cfg: &Config, key: &str) -> Result<String, String> {
+    match cfg.get_str(key) {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(cfg.config_refusal(key)),
+    }
+}
+
+/// A row whose config value could not be read: refused, in the console's own words, with no fix --
+/// there is nothing to fix until a human names the value.
+fn refused_row(
+    cfg: &Config,
+    at: SystemTime,
+    label: &str,
+    key: &str,
+    sentence: String,
+) -> RuntimeRow {
+    RuntimeRow {
+        label: label.to_string(),
+        key: key.to_string(),
+        light: Light::Fail,
+        state: "refused".to_string(),
+        detail: sentence,
+        fix: String::new(),
+        source: cfg.source_line(),
+        age: iso::age_text(cfg.read_at, at),
+    }
+}
+
+/// One image the config names: present, absent, or the read that could not be taken.
+fn image_row(cfg: &Config, probes: &Probes, key: &str, label: &str, build: &str) -> RuntimeRow {
+    let name = match config_name(cfg, key) {
+        Ok(name) => name,
+        Err(sentence) => return refused_row(cfg, probes.at, label, key, sentence),
+    };
+    let age = iso::age_text(probes.docker_images.at, probes.at);
+    let source = probes.docker_images.source.clone();
+    let (light, state, detail, fix) = match &probes.docker_images.error {
+        Some(error) => (
+            Light::Unknown,
+            "unreadable".to_string(),
+            format!("the image list could not be read: {error}"),
+            String::new(),
+        ),
+        None if probes.docker_images.value.iter().any(|tag| tag == &name) => (
+            Light::Ok,
+            "present".to_string(),
+            format!("{name} is present"),
+            String::new(),
+        ),
+        None => (
+            Light::Missing,
+            "absent".to_string(),
+            format!("{name} is not present on this host"),
+            build.replace("{image}", &name),
+        ),
+    };
+    RuntimeRow {
+        label: label.to_string(),
+        key: key.to_string(),
+        light,
+        state,
+        detail,
+        fix,
+        source,
+        age,
+    }
+}
+
+/// One container the config names: running, exited, absent, or the read that could not be taken.
+///
+/// The three observed states are kept apart on purpose. The earlier incident was a console watching a
+/// container that was never started, and `docker ps` alone cannot tell that from a container that ran
+/// and stopped: both are "not in the running list". `docker ps -a` names the difference, and this row
+/// prints it.
+fn container_row(cfg: &Config, probes: &Probes, key: &str, label: &str) -> RuntimeRow {
+    let name = match config_name(cfg, key) {
+        Ok(name) => name,
+        Err(sentence) => return refused_row(cfg, probes.at, label, key, sentence),
+    };
+    let age = iso::age_text(probes.docker_containers.at, probes.at);
+    let source = probes.docker_containers.source.clone();
+    // The launcher is what creates both the broker and the agent container. It is the exact command
+    // a human would run; the panel only prints it.
+    let launcher = "bash sandbox/run-agent.sh";
+    let (light, state, detail, fix) = match &probes.docker_containers.error {
+        Some(error) => (
+            Light::Unknown,
+            "unreadable".to_string(),
+            format!("the container list could not be read: {error}"),
+            String::new(),
+        ),
+        None => match probes
+            .docker_containers
+            .value
+            .iter()
+            .find(|row| row.name == name)
+        {
+            Some(row) if row.status.starts_with("Up ") => (
+                Light::Ok,
+                "running".to_string(),
+                format!("{name}: {}", row.status),
+                String::new(),
+            ),
+            Some(row) => (
+                Light::Warn,
+                container_state_word(&row.status),
+                format!("{name}: {}", row.status),
+                launcher.to_string(),
+            ),
+            None => (
+                Light::Missing,
+                "absent".to_string(),
+                format!("no container named {name} exists (docker ps -a lists no such name)"),
+                launcher.to_string(),
+            ),
+        },
+    };
+    RuntimeRow {
+        label: label.to_string(),
+        key: key.to_string(),
+        light,
+        state,
+        detail,
+        fix,
+        source,
+        age,
+    }
+}
+
+/// The observed state of an existing container, from docker's own status column.
+///
+/// `Up 19 hours` is running; anything else -- `Exited (255) ...`, `Created`, `Restarting`, `Paused`,
+/// `Dead` -- is named by its own first word, so a container that exists but does nothing keeps its
+/// real state instead of being flattened into `not running`.
+fn container_state_word(status: &str) -> String {
+    status
+        .split_whitespace()
+        .next()
+        .unwrap_or("unknown")
+        .to_lowercase()
+}
+
+/// One network the config names: present, absent, or the read that could not be taken.
+fn network_row(cfg: &Config, probes: &Probes, key: &str, label: &str) -> RuntimeRow {
+    let name = match config_name(cfg, key) {
+        Ok(name) => name,
+        Err(sentence) => return refused_row(cfg, probes.at, label, key, sentence),
+    };
+    let age = iso::age_text(probes.docker_networks.at, probes.at);
+    let source = probes.docker_networks.source.clone();
+    let (light, state, detail, fix) = match &probes.docker_networks.error {
+        Some(error) => (
+            Light::Unknown,
+            "unreadable".to_string(),
+            format!("the network list could not be read: {error}"),
+            String::new(),
+        ),
+        None if probes.docker_networks.value.iter().any(|net| net == &name) => (
+            Light::Ok,
+            "present".to_string(),
+            format!("{name} is present"),
+            String::new(),
+        ),
+        None => (
+            Light::Missing,
+            "absent".to_string(),
+            format!("{name} is not present on this host"),
+            format!("docker network create --internal {name}"),
+        ),
+    };
+    RuntimeRow {
+        label: label.to_string(),
+        key: key.to_string(),
+        light,
+        state,
+        detail,
+        fix,
+        source,
+        age,
+    }
+}
+
+/// One MCP server, from the port probe the console already runs inside the agent container.
+fn mcp_row(cfg: &Config, probes: &Probes, server: &str, port: u16, fix: McpFix) -> RuntimeRow {
+    let label = format!("MCP server {server}");
+    let age = iso::age_text(probes.ports.at, probes.at);
+    let source = probes.ports.source.clone();
+    let container = cfg.get_str("console.container").unwrap_or_default();
+    let fix_command = match fix {
+        McpFix::Gate => format!(
+            "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0"
+        ),
+        McpFix::Script => {
+            format!("docker exec {container} bash /workspace/scripts/start-mcp-servers.sh")
+        }
+    };
+    let reading = probes
+        .ports
+        .value
+        .iter()
+        .find(|(probed, _)| *probed == port);
+    let (light, state, detail, fix_text) = match &probes.ports.error {
+        Some(error) => (
+            Light::Unknown,
+            "unreadable".to_string(),
+            format!("the port could not be probed: {error}"),
+            String::new(),
+        ),
+        None => match reading {
+            Some((_, true)) => (
+                Light::Ok,
+                "listening".to_string(),
+                format!("port {port} in {container} accepts a connection"),
+                String::new(),
+            ),
+            Some((_, false)) => (
+                Light::Missing,
+                "not listening".to_string(),
+                format!("port {port} in {container} refuses a connection"),
+                fix_command,
+            ),
+            None => (
+                Light::Unknown,
+                "not read".to_string(),
+                format!("port {port} was not among the ports probed"),
+                String::new(),
+            ),
+        },
+    };
+    RuntimeRow {
+        label,
+        key: format!("console.ports.{server}"),
+        light,
+        state,
+        detail,
+        fix: fix_text,
+        source,
+        age,
+    }
+}
+
 /// The `-p` argument of a command line, when it carries one.
 pub fn prompt_argument(command: &str) -> Option<String> {
     let index = command.find(" -p ")?;
@@ -2648,5 +3120,189 @@ mod scorecard_tests {
             reading.rows[0].cases, "no case count recorded",
             "an absent count is named, never rendered as 0/0"
         );
+    }
+}
+
+/// The RUNTIME panel's contract, pinned: a container is running, exited or absent (never a boolean);
+/// a read that could not be taken is a word, not a green tick; and a config value the panel cannot
+/// read is the console's own refusal sentence, with no fix invented for it.
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::config::Console;
+
+    /// A config with every key the RUNTIME panel reads, built here so the test does not depend on the
+    /// embedded defaults or on any file on disk.
+    fn runtime_config() -> Config {
+        let root: Value = serde_json::from_str(
+            r#"{
+              "containers": {
+                "base_image": "agent-sandbox:test",
+                "tools_image": "agent-sandbox:test-m3",
+                "networks": {"internal": "test-internal"},
+                "broker": {"name": "test-broker"}
+              },
+              "console": {
+                "container": "test-agent",
+                "ports": {"gate": 8003, "storage": 8001, "retrieval": 8002}
+              }
+            }"#,
+        )
+        .expect("the fixture config parses");
+        Config {
+            repo: PathBuf::from("/nonexistent/agentic-console-runtime-test"),
+            path: PathBuf::from("/nonexistent/agentic-console-runtime-test/agentic.config.json"),
+            root,
+            from_file: true,
+            config_read: Some(PathBuf::from(
+                "/nonexistent/agentic-console-runtime-test/agentic.config.json",
+            )),
+            console: Console {
+                container: "test-agent".to_string(),
+                ..Console::default()
+            },
+            console_present: true,
+            container_overridden: false,
+            read_at: SystemTime::now(),
+            load_error: None,
+        }
+    }
+
+    fn container(name: &str, status: &str) -> ContainerRow {
+        ContainerRow {
+            name: name.to_string(),
+            image: "an-image".to_string(),
+            status: status.to_string(),
+            ports: String::new(),
+        }
+    }
+
+    fn row<'a>(view: &'a RuntimeView, label: &str) -> &'a RuntimeRow {
+        view.rows
+            .iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("a runtime row labelled `{label}` exists"))
+    }
+
+    #[test]
+    fn a_container_is_named_running_exited_or_absent_never_a_boolean() {
+        let cfg = runtime_config();
+        let at = SystemTime::now();
+        let mut probes = Probes::empty(&cfg, at);
+        probes.docker_daemon = Reading::ok("29.8.1".to_string(), "docker version", at);
+        probes.docker_containers = Reading::ok(
+            vec![
+                container("test-broker", "Up 46 hours"),
+                container("test-agent", "Exited (255) 3 days ago"),
+            ],
+            "docker ps -a",
+            at,
+        );
+        probes.docker_images =
+            Reading::ok(vec!["agent-sandbox:test".to_string()], "docker images", at);
+        probes.docker_networks = Reading::ok(vec!["bridge".to_string()], "docker network ls", at);
+        probes.ports = Reading::ok(
+            vec![(8003, true), (8001, false), (8002, false)],
+            "docker exec test-agent python3 -c <tcp connect probe>",
+            at,
+        );
+        let view = Snapshot::from_parts(cfg, probes).runtime;
+
+        assert_eq!(row(&view, "broker container").state, "running");
+        assert_eq!(row(&view, "broker container").light, Light::Ok);
+        assert_eq!(row(&view, "broker container").fix, "");
+
+        // Exists but does nothing: its own state, a warning, with the launcher as the fix.
+        assert_eq!(row(&view, "agent container").state, "exited");
+        assert_eq!(row(&view, "agent container").light, Light::Warn);
+        assert!(row(&view, "agent container").fix.contains("run-agent.sh"));
+
+        // An image the config names that is not in the image list is absent, with its build command.
+        assert_eq!(row(&view, "tools image").state, "absent");
+        assert_eq!(row(&view, "tools image").light, Light::Missing);
+        assert!(row(&view, "tools image")
+            .fix
+            .contains("docker build -f sandbox/Dockerfile.m3"));
+
+        assert_eq!(row(&view, "base image").state, "present");
+
+        // The network the config names is not in the network list.
+        assert_eq!(row(&view, "internal network").state, "absent");
+        assert!(row(&view, "internal network")
+            .fix
+            .contains("docker network create --internal test-internal"));
+
+        // The ports tell the three MCP servers apart, and a down one carries the script that starts
+        // it -- printed, never run.
+        assert_eq!(row(&view, "MCP server gate").state, "listening");
+        assert_eq!(row(&view, "MCP server storage").state, "not listening");
+        assert!(row(&view, "MCP server storage")
+            .fix
+            .contains("start-mcp-servers.sh"));
+        assert!(row(&view, "MCP server gate").fix.is_empty());
+
+        assert!(view.summary.starts_with("NOT READY"), "{}", view.summary);
+    }
+
+    #[test]
+    fn a_read_that_could_not_be_taken_is_a_word_not_a_green_tick() {
+        let cfg = runtime_config();
+        let at = SystemTime::now();
+        // Every probe failed with `not probed`: no row may render as a green tick, and no row may
+        // carry a fix for a state the console never observed.
+        let probes = Probes::empty(&cfg, at);
+        let view = Snapshot::from_parts(cfg, probes).runtime;
+
+        assert!(
+            view.rows.iter().all(|row| row.light != Light::Ok),
+            "a failed read is never drawn as present"
+        );
+        // The one row that still carries a fix is the daemon: a daemon that is not answering is fixed
+        // by starting it, in this repository's own words (`sandbox/run-agent.sh` prints exactly that
+        // sentence). Every other row a failed read touched is unreadable with no fix -- the console
+        // does not call a thing missing, or name a way to fix it, from a read it never took.
+        for row in &view.rows {
+            if row.label == "docker daemon" {
+                assert_eq!(row.state, "no reply");
+                assert!(row.fix.contains("systemctl start docker"));
+            } else {
+                assert!(
+                    row.fix.is_empty(),
+                    "`{}` offers no fix for a state it never observed: {}",
+                    row.label,
+                    row.fix
+                );
+            }
+        }
+        assert!(
+            view.summary.starts_with("PARTLY READABLE"),
+            "{}",
+            view.summary
+        );
+    }
+
+    #[test]
+    fn an_empty_config_value_is_refused_in_the_console_own_words() {
+        let mut cfg = runtime_config();
+        cfg.root
+            .as_object_mut()
+            .and_then(|root| root.get_mut("containers"))
+            .and_then(Value::as_object_mut)
+            .expect("the containers block is an object")
+            .remove("tools_image");
+        let at = SystemTime::now();
+        let mut probes = Probes::empty(&cfg, at);
+        probes.docker_images = Reading::ok(Vec::new(), "docker images", at);
+        let view = Snapshot::from_parts(cfg, probes).runtime;
+
+        let refused = row(&view, "tools image");
+        assert_eq!(refused.state, "refused");
+        assert_eq!(refused.light, Light::Fail);
+        assert!(
+            refused.detail.contains("containers.tools_image is empty"),
+            "the refusal sentence is the console's own: {}",
+            refused.detail
+        );
+        assert!(refused.fix.is_empty(), "a refused row offers no fix");
     }
 }
