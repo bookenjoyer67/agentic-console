@@ -21,6 +21,14 @@ WHAT --apply WRITES, AND FROM WHERE
       docker objects         the internal network, the broker network, the registry volume, the image
       the launcher's ports   scripts/start-mcp-servers.sh, so the ports the config advertises and the
                              ports the servers bind cannot disagree
+      the consumers' literals every file the fork check sweeps (scripts/, mcp/, eval/, .claude/,
+                             .github/workflows/ and the root wiring files): each value the ancestor
+                             carried is rewritten to this project's value, longest literal first, so a
+                             fallback left behind in a consumer cannot survive the fork. The set is
+                             derived the same way the check derives it, so the two read the same tree.
+    A seam whose value the manifest leaves EQUAL to the parent's -- a Rust crate that keeps its name,
+    so the clippy cache-hit guard touches the same file -- is recorded in `port.kept` with its reason
+    rather than failed, exactly as the reference kit recorded a deliberately kept seam.
     Then it runs the kit's fork check and prints the result.
 
 THE PARENT'S DEFAULTS (`port.upstream_defaults`, and why that name)
@@ -79,6 +87,20 @@ SEAMS = (
     "console.ports",
     "console.role_container_prefix",
 )
+
+# The files the fork check sweeps, mirrored here so --apply re-points exactly what the check reads.
+# scripts/port-self-test.sh DERIVES this set from the tree's wiring rather than hand-listing it, and
+# gives the reason: a hand list named seven files and missed a launcher that carried the reference
+# image name. The set is named twice -- once there, once here -- because the check is a bash script
+# with no importable module and the wizard must not guess a narrower list; the constants match it
+# key for key, and a file the check scans is a file the wizard has re-pointed.
+WIRING_DIRS = ("scripts/", "mcp/", "eval/", ".claude/", ".github/workflows/")
+WIRING_SUFFIXES = (".py", ".sh", ".json", ".yml", ".yaml")
+WIRING_MARKDOWN_DIRS = (".claude/agents/",)
+WIRING_ROOT_FILES = ("docker-entrypoint.sh", ".mcp.json")
+# Each exclusion carries the reason the check gives it: prose and the historical record name the
+# reference project legitimately, and the console's Rust fallback is a separate change, gated there.
+SCAN_EXCLUDED = (".memory/", "docs/", "node_modules/", "src/", "target/", "vendor/")
 
 # ---------------------------------------------------------------- json helpers
 
@@ -189,6 +211,21 @@ def detect(repo: Path) -> dict:
 def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, facts: dict,
                    ports: dict[str, int], extra_gates: dict[str, dict],
                    console_container: str, models: dict) -> dict:
+    gates = {**facts["gates"], **extra_gates}
+    # The clippy cache-hit guard's marker is the string a cargo run prints: "Checking <crate>". A
+    # copy of the parent detects the PARENT's crate name, and a marker equal to the parent's would
+    # fail the fork check for a seam that IS this project's identity -- so when detection lands on
+    # the parent's own project name, the marker names THIS project instead. The crate then has to be
+    # renamed to the slug (or the manifest edited) for a real cargo run to print it, and the note
+    # says so rather than letting the guard go quietly unsatisfiable.
+    guard = dig(gates, "clippy.guard")
+    if (isinstance(guard, dict) and guard.get("marker") == f"Checking {facts.get('package')}"
+            and facts.get("package") == dig(parent_cfg, "project.name")):
+        print(f"  note  the {facts.get('language')} crate is still named {facts.get('package')!r}, "
+              f"the parent's project name.")
+        print(f"        The clippy guard's marker names this project, {slug!r}; rename the crate to "
+              f"{slug!r} (or edit gates.clippy.guard.marker) so a cargo run prints it.")
+        guard["marker"] = f"Checking {slug}"
     return {
         "schema_version": "1",
         "project": {
@@ -199,7 +236,7 @@ def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, fa
                        "repo": str(parent_kit)},
         },
         "detected": {k: facts[k] for k in ("language", "package", "manifest")},
-        "gates": {**facts["gates"], **extra_gates},
+        "gates": gates,
         "runtime": {
             "image": f"agent-sandbox:{slug}",
             "tools_image": f"agent-sandbox:{slug}-m1",
@@ -224,16 +261,29 @@ def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, fa
     }
 
 
-def apply_manifest(parent_cfg: dict, manifest: dict) -> tuple[dict, dict]:
-    """The parent's seam table, re-pointed from the manifest. Returns (config, recorded_defaults)."""
+def apply_manifest(parent_cfg: dict, manifest: dict, recorded_parent: dict | None = None
+                   ) -> tuple[dict, dict]:
+    """The parent's seam table, re-pointed from the manifest. Returns (config, recorded_defaults).
+
+    `recorded_parent` is the parent's OWN ancestry entry, and it is set only when a tree onboards
+    itself -- the wizard run from inside the tree it is onboarding, as the kit's own copy is. Then
+    `parent_cfg` is the tree's CURRENT config, and the parent whose values complete the chain is the
+    generation that config already records; re-reading the parent's seams from the live config would
+    record this project as its own ancestor and lose idempotence. Passing the recorded entry in keeps
+    the second `--apply` byte for byte the first.
+    """
     cfg = json.loads(json.dumps(parent_cfg))  # deep copy: never mutate the parent's table
 
     # 1. every declared seam, at the value the PARENT carries. Read BEFORE re-pointing anything:
     #    this becomes the parent's entry in the ancestry chain.
-    parent_values = {k: dig(cfg, k) for k in SEAMS}
-    parent_values = {k: v for k, v in parent_values.items() if v is not None}
-    parent_review = {k: dig(cfg, k) for k in REVIEW_KEYS}
-    parent_review = {k: v for k, v in parent_review.items() if v is not None}
+    if recorded_parent is not None:
+        parent_values = recorded_parent.get("seams") or {}
+        parent_review = recorded_parent.get("review") or {}
+    else:
+        parent_values = {k: dig(cfg, k) for k in SEAMS}
+        parent_values = {k: v for k, v in parent_values.items() if v is not None}
+        parent_review = {k: dig(cfg, k) for k in REVIEW_KEYS}
+        parent_review = {k: v for k, v in parent_review.items() if v is not None}
 
     p, rt, pr = manifest["project"], manifest["runtime"], manifest["ports"]
 
@@ -290,6 +340,10 @@ def apply_manifest(parent_cfg: dict, manifest: dict) -> tuple[dict, dict]:
     #    find a grandparent's leftovers -- a parent-only record cannot, and that is how one
     #    generation's names reach a third.
     parent_chain = dig(parent_cfg, "port.ancestors") or []
+    if recorded_parent is not None and parent_chain:
+        # This tree's own config already carries the entry we are regenerating; drop it so a second
+        # apply does not append the same parent twice.
+        parent_chain = parent_chain[:-1]
     cfg["port"] = {
         "seams": list(SEAMS),
         "ancestors": [
@@ -297,6 +351,9 @@ def apply_manifest(parent_cfg: dict, manifest: dict) -> tuple[dict, dict]:
             {"name": p["parent"]["name"], "seams": parent_values, "review": parent_review},
         ],
     }
+    # `kept` is computed at the END of this function, once every seam has its final value: a seam
+    # recorded there must equal the parent's in the FINAL config, and the console block is re-pointed
+    # below step 5.
     # An excusal names a value in an INHERITED file, so it carries down. `kept` does not: keeping
     # an ancestor's value is a decision each project makes for itself.
     parent_quoted = dig(parent_cfg, "port.quoted") or []
@@ -323,8 +380,18 @@ def apply_manifest(parent_cfg: dict, manifest: dict) -> tuple[dict, dict]:
     console["upstream_defaults"] = sorted(
         k for k, v in console.items()
         if not k.startswith("_") and k not in ("ports", "repo", "project", "container",
-                                               "role_container_prefix")
+                                               "role_container_prefix", "upstream_defaults")
         and v == parent_console.get(k))
+
+    # Now that every seam has its final value, record the ones the manifest leaves equal to the
+    # parent's. A Rust fork that keeps its crate name finds the clippy cache-hit guard touching the
+    # same source file; that seam cannot differ, and `port.kept` is where the kit records such a
+    # value -- printed with its reason rather than swept as a leak. The container and image seams are
+    # always re-pointed above, so they are never kept: restoring an ancestor's container name in the
+    # config still fails the check.
+    kept = kept_seams(parent_values, cfg, str(p["parent"]["name"]))
+    if kept:
+        cfg["port"]["kept"] = kept
 
     return cfg, parent_values
 
@@ -342,10 +409,16 @@ def render_env_example(parent_kit: Path, parent_cfg: dict, manifest: dict) -> st
         return None
     text = source.read_text()
 
+    # The source can be a `.env.example` a previous --apply already wrote -- a tree onboarding
+    # itself reads its own -- so drop the header that run prepended. Prepending it again would grow
+    # the file on every apply, and the file has to be byte-identical when the manifest is unchanged.
+    text = re.sub(r"^# Environment for [^\n]*\n#\n# Generated from [^\n]*\n(?:# [^\n]*\n)*#\n",
+                  "", text, count=1)
+
     rt, p = manifest["runtime"], manifest["project"]
     parent_name = str(dig(parent_cfg, "project.name", ""))
     # The env file uses TWO names for the same project: the full slug, and a shorter one that
-    # survives from how the broker and the state dir are named (`console-broker` -> `console`).
+    # survives from how the broker and the state dir are named (`<slug>-broker` -> `<slug>`).
     # Re-pointing only the long one leaves half the file on the parent's names -- which is what
     # happened the first time this ran, with BROKER_IMAGE and STATE staying put while IMAGE
     # moved. Both forms are substituted, and only ever inside a full pattern.
@@ -442,6 +515,128 @@ def repoint_server_ports(repo: Path, manifest: dict) -> list[str]:
     return notes
 
 
+# ---------------------------------------------------------------- the consumers' literals
+
+
+def _leaf_pairs(old: Any, new: Any, out: list[tuple[str, str]]) -> None:
+    """Append (old-literal, new-literal) pairs for one seam, pairing by KEY and not by position.
+
+    A seam can hold a dict -- console.ports does -- and pairing positionally would map a storage port
+    onto the gate port: 8001 storage must become 8202 storage, never 8201. A value shorter than the
+    four characters the check searches for is skipped, so re-pointing follows the same sight line the
+    check reads by. A bool is not a literal to substitute.
+    """
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in old:
+            if key in new:
+                _leaf_pairs(old[key], new[key], out)
+        return
+    if isinstance(old, list) and isinstance(new, list):
+        for o, n in zip(old, new):
+            _leaf_pairs(o, n, out)
+        return
+    if isinstance(old, bool) or isinstance(new, bool):
+        return
+    if isinstance(old, (str, int, float)) and isinstance(new, (str, int, float)):
+        o, n = str(old), str(new)
+        if len(o) >= 4 and n and o != n:
+            out.append((o, n))
+
+
+def identity_renames(parent_cfg: dict, cfg: dict) -> list[tuple[str, str]]:
+    """The parent's identity values, each paired with this project's value for the same seam.
+
+    A seam the manifest leaves equal to the parent's yields no pair: its literal IS this project's, so
+    rewriting it would be wrong. Every other seam becomes a substitution, in both its plain and its
+    source-escaped form -- the marker regex carries single backslashes in the JSON and doubled ones in
+    Python source, exactly the two forms the check searches for.
+    """
+    pairs: list[tuple[str, str]] = []
+    for path in SEAMS:
+        old, new = dig(parent_cfg, path), dig(cfg, path)
+        if old is None or old == new:
+            continue
+        _leaf_pairs(old, new, pairs)
+    subs: list[tuple[str, str]] = []
+    for old, new in pairs:
+        subs.append((old, new))
+        if "\\" in old or "\\" in new:
+            subs.append((old.replace("\\", "\\\\"), new.replace("\\", "\\\\")))
+    # Longest first, so a shorter key never rewrites part of a longer one: agent-sandbox:console-m1
+    # must be handled before agent-sandbox:console, and the whole marker regex before its inner name.
+    return sorted(set(subs), key=lambda kv: -len(kv[0]))
+
+
+def _wiring_files(repo: Path, records: dict) -> list[str]:
+    """The tree's wiring files, chosen by the same predicate scripts/port-self-test.sh uses."""
+    found: list[str] = []
+    for path in sorted(repo.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(repo).as_posix()
+        if rel.startswith("__pycache__/") or rel.endswith((".pyc", ".pyo")):
+            continue
+        if rel in records or any(rel.startswith(d) for d in SCAN_EXCLUDED):
+            continue
+        if rel.startswith(WIRING_DIRS) and rel.endswith(WIRING_SUFFIXES):
+            found.append(rel)
+        elif rel.startswith(WIRING_MARKDOWN_DIRS) and rel.endswith(".md"):
+            found.append(rel)
+        elif "/" not in rel and (rel.startswith("Dockerfile") or rel in WIRING_ROOT_FILES):
+            found.append(rel)
+    return found
+
+
+def repoint_consumers(repo: Path, parent_cfg: dict, cfg: dict) -> list[str]:
+    """Rewrite every ancestor identity literal in the files the fork check sweeps.
+
+    This is the step that makes the wizard's docstring true: the config is not the only copy of a
+    fork's identity. A consumer that still holds the parent's container name, image tag, project key,
+    port or network is the half-wired case the check exists to catch, and the check names it by file
+    and line. The mapping comes from the seam table alone -- the value the parent carried at each
+    seam against the value this manifest plants -- so a file the check reads cannot disagree with the
+    config afterwards. Returns the files changed, for the run to print.
+    """
+    subs = identity_renames(parent_cfg, cfg)
+    if not subs:
+        return []
+    records = dig(cfg, "port.records") or {}
+    changed: list[str] = []
+    for rel in _wiring_files(repo, records):
+        path = repo / rel
+        text = path.read_text(encoding="utf-8", errors="surrogateescape")
+        new_text = text
+        for old, new in subs:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+        if new_text != text:
+            path.write_text(new_text, encoding="utf-8", errors="surrogateescape")
+            changed.append(rel)
+    return changed
+
+
+def kept_seams(parent_values: dict, cfg: dict, parent_name: str) -> dict[str, str]:
+    """Seams the manifest leaves at the parent's value, each with the reason it is honest to keep.
+
+    A fork of a Rust crate that keeps its name finds the clippy cache-hit guard touching the same
+    source file, so that seam cannot differ from the parent's -- and a seam that legitimately equals
+    an ancestor's is exactly what `port.kept` records. Recorded rather than swept, printed rather
+    than silent: the check lists it as kept, names the reason, and stops reporting every honest use
+    of the value as a leak. Only a seam the seam table places here is kept; the container and image
+    seams are always re-pointed, so the mutation that restores an ancestor's container name still
+    fails the check. `parent_values` is the effective parent's seam table -- the parent kit's, or the
+    recorded generation's when a tree onboards itself -- so this is stable across a second apply.
+    """
+    kept: dict[str, str] = {}
+    for path in SEAMS:
+        old, new = parent_values.get(path), dig(cfg, path)
+        if old is not None and old == new:
+            kept[path] = (f"this project's {path!r} equals {parent_name}'s ({old!r}): the manifest "
+                          f"leaves it there because the detected layout does not depart from it, so "
+                          f"keeping it is honest usage, not an unported leftover")
+    return kept
+
+
 # ---------------------------------------------------------------- docker
 
 
@@ -528,7 +723,20 @@ def mode_apply(args, repo: Path) -> int:
         raise SystemExit(f"the parent kit at {parent_repo} carries no agentic.config.json")
     parent_cfg = json.loads(parent_cfg_path.read_text())
 
-    cfg, recorded = apply_manifest(parent_cfg, manifest)
+    # A tree can onboard ITSELF -- the wizard run from inside the tree it is onboarding, which is how
+    # this kit's own copy is onboarded. Then the parent path resolves to the tree, and re-reading its
+    # live config as the parent would record this project as its own ancestor and change the tree on
+    # a second apply. The parent is instead the generation this tree's config already records, so the
+    # entry is handed to apply_manifest and the config made in the previous run is regenerated, not
+    # re-derived from itself.
+    recorded_parent: dict | None = None
+    if (parent_repo.resolve() == repo.resolve()
+            and dig(parent_cfg, "project.name") == dig(manifest, "project.name")):
+        chain = dig(parent_cfg, "port.ancestors") or []
+        if chain and chain[-1].get("name") == dig(manifest, "project.parent.name"):
+            recorded_parent = chain[-1]
+
+    cfg, recorded = apply_manifest(parent_cfg, manifest, recorded_parent)
     show(manifest, recorded, heading="applying:")
 
     target = repo / "agentic.config.json"
@@ -562,6 +770,14 @@ def mode_apply(args, repo: Path) -> int:
         print("\nrefusing to report success: a port pattern matched nothing, so a server would")
         print("keep another project's port. Fix PORT_TARGETS for this layout, or say why.")
         return 1
+
+    renamed = repoint_consumers(repo, parent_cfg, cfg)
+    if renamed:
+        print(f"\nre-pointed {len(renamed)} consumer file(s) from the seam table:")
+        for rel in renamed:
+            print(f"  {rel}")
+    else:
+        print("\nno consumer literal carried the parent's identity; nothing to re-point.")
 
     if not args.no_docker:
         for cmd in plan_runtime(manifest):
