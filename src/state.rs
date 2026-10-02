@@ -2343,15 +2343,6 @@ pub struct RuntimeView {
     pub summary: String,
 }
 
-/// How a down MCP server is brought back up. The gate server has its own entrypoint; storage and
-/// retrieval are started together by the repository's own script, which also selects the embedding
-/// model the repository measured against -- starting the retrieval server by hand yields a worse
-/// result, so the panel names the script rather than a plausible one-liner.
-enum McpFix {
-    Gate,
-    Script,
-}
-
 /// Build the RUNTIME view: one row per prerequisite the config names, each carrying the state the
 /// machine actually reported and the exact command that would fix it.
 ///
@@ -2388,20 +2379,22 @@ fn build_runtime(cfg: &Config, probes: &Probes) -> RuntimeView {
         },
     });
 
-    // 2. The two images the config names, each with the build command this repository documents.
-    for (key, label, build) in [
+    // 2. The two images the config names, each with the build command the config carries. The
+    // command lives in `runtime_commands`, and its `{image}` placeholder is filled with the image
+    // name from that image's own seam key, so the name and the command each live in one place.
+    for (image_key, label, build_key) in [
         (
             "containers.base_image",
             "base image",
-            "docker build -t {image} .",
+            "runtime_commands.base_image_build",
         ),
         (
             "containers.tools_image",
             "tools image",
-            "docker build -f sandbox/Dockerfile.m3 -t {image} .",
+            "runtime_commands.tools_image_build",
         ),
     ] {
-        rows.push(image_row(cfg, probes, key, label, build));
+        rows.push(image_row(cfg, probes, image_key, label, build_key));
     }
 
     // 3. The credential broker, 4. the internal network, 5. the agent container.
@@ -2425,26 +2418,31 @@ fn build_runtime(cfg: &Config, probes: &Probes) -> RuntimeView {
     ));
 
     // 6. The three MCP servers, on the ports the config names, probed inside the agent container.
+    // The gate server has its own entrypoint; storage and retrieval are started together by the
+    // repository's own script, which also selects the embedding model the repository measured
+    // against -- starting the retrieval server by hand yields a worse result, so the config names
+    // the script rather than a plausible one-liner. The two are different commands from different
+    // files and stay two keys.
     rows.push(mcp_row(
         cfg,
         probes,
         "gate",
         cfg.console.gate_port,
-        McpFix::Gate,
+        "runtime_commands.gate_start",
     ));
     rows.push(mcp_row(
         cfg,
         probes,
         "storage",
         cfg.console.storage_port,
-        McpFix::Script,
+        "runtime_commands.storage_retrieval_start",
     ));
     rows.push(mcp_row(
         cfg,
         probes,
         "retrieval",
         cfg.console.retrieval_port,
-        McpFix::Script,
+        "runtime_commands.storage_retrieval_start",
     ));
 
     let summary = runtime_summary(&rows);
@@ -2509,10 +2507,24 @@ fn refused_row(
 }
 
 /// One image the config names: present, absent, or the read that could not be taken.
-fn image_row(cfg: &Config, probes: &Probes, key: &str, label: &str, build: &str) -> RuntimeRow {
-    let name = match config_name(cfg, key) {
+///
+/// The row reads two config keys: the image name (`containers.*`) and the build command
+/// (`runtime_commands.*`). Either one empty or absent refuses the row in the console's own words,
+/// exactly as an empty image name already did -- the build command is never a literal in this file.
+fn image_row(
+    cfg: &Config,
+    probes: &Probes,
+    image_key: &str,
+    label: &str,
+    build_key: &str,
+) -> RuntimeRow {
+    let name = match config_name(cfg, image_key) {
         Ok(name) => name,
-        Err(sentence) => return refused_row(cfg, probes.at, label, key, sentence),
+        Err(sentence) => return refused_row(cfg, probes.at, label, image_key, sentence),
+    };
+    let build = match config_name(cfg, build_key) {
+        Ok(build) => build,
+        Err(sentence) => return refused_row(cfg, probes.at, label, build_key, sentence),
     };
     let age = iso::age_text(probes.docker_images.at, probes.at);
     let source = probes.docker_images.source.clone();
@@ -2538,7 +2550,7 @@ fn image_row(cfg: &Config, probes: &Probes, key: &str, label: &str, build: &str)
     };
     RuntimeRow {
         label: label.to_string(),
-        key: key.to_string(),
+        key: image_key.to_string(),
         light,
         state,
         detail,
@@ -2562,8 +2574,22 @@ fn container_row(cfg: &Config, probes: &Probes, key: &str, label: &str) -> Runti
     let age = iso::age_text(probes.docker_containers.at, probes.at);
     let source = probes.docker_containers.source.clone();
     // The launcher is what creates both the broker and the agent container. It is the exact command
-    // a human would run; the panel only prints it.
-    let launcher = "bash sandbox/run-agent.sh";
+    // a human would run; the panel only prints it. It comes from the config like every other value
+    // -- a hardcoded copy is a fork showing another project's path. This is NOT `artifacts.launcher`
+    // (`scripts/run-agent.sh`, the per-role wrapper that drives one box): this engine creates the
+    // runtime the box needs. An empty or absent value refuses the row rather than guessing one.
+    let launcher = match config_name(cfg, "runtime_commands.engine_launcher") {
+        Ok(launcher) => launcher,
+        Err(sentence) => {
+            return refused_row(
+                cfg,
+                probes.at,
+                label,
+                "runtime_commands.engine_launcher",
+                sentence,
+            )
+        }
+    };
     let (light, state, detail, fix) = match &probes.docker_containers.error {
         Some(error) => (
             Light::Unknown,
@@ -2587,13 +2613,13 @@ fn container_row(cfg: &Config, probes: &Probes, key: &str, label: &str) -> Runti
                 Light::Warn,
                 container_state_word(&row.status),
                 format!("{name}: {}", row.status),
-                launcher.to_string(),
+                launcher.clone(),
             ),
             None => (
                 Light::Missing,
                 "absent".to_string(),
                 format!("no container named {name} exists (docker ps -a lists no such name)"),
-                launcher.to_string(),
+                launcher,
             ),
         },
     };
@@ -2663,19 +2689,23 @@ fn network_row(cfg: &Config, probes: &Probes, key: &str, label: &str) -> Runtime
 }
 
 /// One MCP server, from the port probe the console already runs inside the agent container.
-fn mcp_row(cfg: &Config, probes: &Probes, server: &str, port: u16, fix: McpFix) -> RuntimeRow {
+///
+/// The start command comes from `runtime_commands`, with `{container}` and `{port}` substituted from
+/// the config; an empty or absent value refuses the row rather than printing a command the config
+/// does not carry. The gate's command and the storage/retrieval script are different keys because
+/// they are different commands from different files.
+fn mcp_row(cfg: &Config, probes: &Probes, server: &str, port: u16, start_key: &str) -> RuntimeRow {
     let label = format!("MCP server {server}");
+    let template = match config_name(cfg, start_key) {
+        Ok(template) => template,
+        Err(sentence) => return refused_row(cfg, probes.at, &label, start_key, sentence),
+    };
     let age = iso::age_text(probes.ports.at, probes.at);
     let source = probes.ports.source.clone();
     let container = cfg.get_str("console.container").unwrap_or_default();
-    let fix_command = match fix {
-        McpFix::Gate => format!(
-            "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0"
-        ),
-        McpFix::Script => {
-            format!("docker exec {container} bash /workspace/scripts/start-mcp-servers.sh")
-        }
-    };
+    let fix_command = template
+        .replace("{container}", &container)
+        .replace("{port}", &port.to_string());
     let reading = probes
         .ports
         .value
@@ -3145,6 +3175,13 @@ mod runtime_tests {
               "console": {
                 "container": "test-agent",
                 "ports": {"gate": 8003, "storage": 8001, "retrieval": 8002}
+              },
+              "runtime_commands": {
+                "engine_launcher": "fixture-engine-launch",
+                "base_image_build": "fixture-build-base {image}",
+                "tools_image_build": "fixture-build-tools {image}",
+                "gate_start": "fixture-gate-start {container} {port}",
+                "storage_retrieval_start": "fixture-services-start {container}"
               }
             }"#,
         )
@@ -3212,17 +3249,19 @@ mod runtime_tests {
         assert_eq!(row(&view, "broker container").light, Light::Ok);
         assert_eq!(row(&view, "broker container").fix, "");
 
-        // Exists but does nothing: its own state, a warning, with the launcher as the fix.
+        // Exists but does nothing: its own state, a warning, with the configured launcher as the fix.
         assert_eq!(row(&view, "agent container").state, "exited");
         assert_eq!(row(&view, "agent container").light, Light::Warn);
-        assert!(row(&view, "agent container").fix.contains("run-agent.sh"));
+        assert!(row(&view, "agent container")
+            .fix
+            .contains("fixture-engine-launch"));
 
         // An image the config names that is not in the image list is absent, with its build command.
         assert_eq!(row(&view, "tools image").state, "absent");
         assert_eq!(row(&view, "tools image").light, Light::Missing);
         assert!(row(&view, "tools image")
             .fix
-            .contains("docker build -f sandbox/Dockerfile.m3"));
+            .contains("fixture-build-tools"));
 
         assert_eq!(row(&view, "base image").state, "present");
 
@@ -3238,7 +3277,7 @@ mod runtime_tests {
         assert_eq!(row(&view, "MCP server storage").state, "not listening");
         assert!(row(&view, "MCP server storage")
             .fix
-            .contains("start-mcp-servers.sh"));
+            .contains("fixture-services-start"));
         assert!(row(&view, "MCP server gate").fix.is_empty());
 
         assert!(view.summary.starts_with("NOT READY"), "{}", view.summary);
@@ -3301,6 +3340,77 @@ mod runtime_tests {
         assert!(
             refused.detail.contains("containers.tools_image is empty"),
             "the refusal sentence is the console's own: {}",
+            refused.detail
+        );
+        assert!(refused.fix.is_empty(), "a refused row offers no fix");
+    }
+
+    /// Put one `runtime_commands` value into the fixture config, so a test can prove the command
+    /// the panel prints is the config's and not a constant in this file.
+    fn set_runtime_command(cfg: &mut Config, key: &str, value: &str) {
+        cfg.root
+            .get_mut("runtime_commands")
+            .and_then(Value::as_object_mut)
+            .expect("the fixture carries a runtime_commands block")
+            .insert(key.to_string(), Value::String(value.to_string()));
+    }
+
+    #[test]
+    fn a_fix_command_comes_from_the_config_and_an_empty_one_refuses() {
+        let mut cfg = runtime_config();
+        let at = SystemTime::now();
+        let mut probes = Probes::empty(&cfg, at);
+        probes.docker_daemon = Reading::ok("29.8.1".to_string(), "docker version", at);
+        // The broker runs; the agent container is absent, so its row needs the engine launcher.
+        probes.docker_containers = Reading::ok(
+            vec![container("test-broker", "Up 3 hours")],
+            "docker ps -a",
+            at,
+        );
+        // No image is present, so both image rows print their build commands.
+        probes.docker_images = Reading::ok(Vec::new(), "docker images", at);
+        probes.docker_networks = Reading::ok(Vec::new(), "docker network ls", at);
+        // Every MCP port refuses, so each server row prints its own start command.
+        probes.ports = Reading::ok(
+            vec![(8003, false), (8001, false), (8002, false)],
+            "docker exec test-agent python3 -c <tcp connect probe>",
+            at,
+        );
+
+        // A recognisable launcher: the absent agent container's fix must be this, not a constant.
+        set_runtime_command(&mut cfg, "engine_launcher", "bash /tmp/proof-launcher.sh");
+        let view = Snapshot::from_parts(cfg.clone(), probes.clone()).runtime;
+        assert_eq!(
+            row(&view, "agent container").fix,
+            "bash /tmp/proof-launcher.sh",
+            "the launcher is read from runtime_commands, not hardcoded"
+        );
+        // The image build and the two MCP starters come from the config too, placeholders filled
+        // from the image name, the container name and the port.
+        assert_eq!(
+            row(&view, "tools image").fix,
+            "fixture-build-tools agent-sandbox:test-m3"
+        );
+        assert_eq!(
+            row(&view, "MCP server gate").fix,
+            "fixture-gate-start test-agent 8003"
+        );
+        assert_eq!(
+            row(&view, "MCP server storage").fix,
+            "fixture-services-start test-agent"
+        );
+
+        // Empty refuses in the console's own words rather than a blank line or a guess.
+        set_runtime_command(&mut cfg, "engine_launcher", "");
+        let view = Snapshot::from_parts(cfg, probes).runtime;
+        let refused = row(&view, "agent container");
+        assert_eq!(refused.state, "refused");
+        assert_eq!(refused.light, Light::Fail);
+        assert!(
+            refused
+                .detail
+                .contains("runtime_commands.engine_launcher is empty"),
+            "the refusal names the empty key: {}",
             refused.detail
         );
         assert!(refused.fix.is_empty(), "a refused row offers no fix");

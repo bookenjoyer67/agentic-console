@@ -66,6 +66,22 @@ MODEL_DEFAULTS = {
     "retrieval": "BAAI/bge-small-en-v1.5",
 }
 
+# The fix commands the RUNTIME panel prints, one per prerequisite it can name a command for.
+# Accepting the wizard's defaults must change nothing, so every default equals the command the panel
+# prints today: the engine that creates the agent runtime, the two image builds, and the two MCP
+# starters. `{image}`, `{container}` and `{port}` are substituted at print time from the config's own
+# keys, so the image, container and port names still live in exactly one place. `engine_launcher` is
+# NOT `artifacts.launcher`: that is scripts/run-agent.sh, the per-role wrapper that drives one box,
+# while this is sandbox/run-agent.sh, the kit's engine. This block is NOT a port.seam: the fork check
+# sweeps identity, and these are the printed wiring the panel shows, which a fork edits freely.
+RUNTIME_COMMAND_DEFAULTS = {
+    "engine_launcher": "bash sandbox/run-agent.sh",
+    "base_image_build": "docker build -t {image} .",
+    "tools_image_build": "docker build -f sandbox/Dockerfile.m3 -t {image} .",
+    "gate_start": "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0",
+    "storage_retrieval_start": "docker exec {container} bash /workspace/scripts/start-mcp-servers.sh",
+}
+
 # The paths that carry PROJECT IDENTITY, declared in `port.seams` and checked against every
 # ancestor's recorded value. This list is the seam table's own statement of what a fork must
 # change; it lives in the config so completeness is reviewable there, not in a script.
@@ -210,7 +226,7 @@ def detect(repo: Path) -> dict:
 
 def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, facts: dict,
                    ports: dict[str, int], extra_gates: dict[str, dict],
-                   console_container: str, models: dict) -> dict:
+                   console_container: str, models: dict, runtime_commands: dict) -> dict:
     gates = {**facts["gates"], **extra_gates}
     # The clippy cache-hit guard's marker is the string a cargo run prints: "Checking <crate>". A
     # copy of the parent detects the PARENT's crate name, and a marker equal to the parent's would
@@ -254,6 +270,7 @@ def build_manifest(parent_cfg: dict, parent_kit: Path, slug: str, repo: Path, fa
         },
         "ports": ports,
         "models": models,
+        "runtime_commands": runtime_commands,
         "artifacts": {
             "evidence_dir": f"~/{slug}-evidence",
             "briefs_dir": f"~/{slug}-evidence/briefs",
@@ -294,6 +311,15 @@ def apply_manifest(parent_cfg: dict, manifest: dict, recorded_parent: dict | Non
     if "models" not in manifest:
         print("  note  the manifest predates the models block; writing this kit's values.")
     plant(cfg, "models", {k: declared.get(k, v) for k, v in MODEL_DEFAULTS.items()})
+
+    # 1c. the fix commands the RUNTIME panel prints, recorded beside the models from the ONE
+    #     manifest. Also not a seam (the fork check sweeps identity), and a manifest written before
+    #     this block carries none, so an absent block defaults to this kit's values.
+    declared_cmds = manifest.get("runtime_commands") or {}
+    if "runtime_commands" not in manifest:
+        print("  note  the manifest predates the runtime_commands block; writing this kit's values.")
+    plant(cfg, "runtime_commands",
+          {k: declared_cmds.get(k, v) for k, v in RUNTIME_COMMAND_DEFAULTS.items()})
 
     # 2. identity
     plant(cfg, "project.name", p["name"])
@@ -673,6 +699,11 @@ def show(manifest: dict, recorded: dict | None = None, heading: str = "") -> Non
     mod = manifest.get("models") or dict(MODEL_DEFAULTS)
     print(f"models     : agent {mod['agent'] or '(the CLI resolves its own default)'}   "
           f"sandbox {mod['sandbox_cli']}   retrieval {mod['retrieval']}")
+    cmds = manifest.get("runtime_commands") or dict(RUNTIME_COMMAND_DEFAULTS)
+    print(f"runtime cmd: engine {cmds['engine_launcher']}")
+    print(f"             build  {cmds['base_image_build']}   |   {cmds['tools_image_build']}")
+    print(f"             start  {cmds['gate_start']}")
+    print(f"                    {cmds['storage_retrieval_start']}")
     if recorded:
         print(f"\nport.ancestors gets the PARENT's {len(recorded)} values as its newest entry, so "
               f"the check works at any depth rather than one generation:")
@@ -694,7 +725,12 @@ def mode_propose(args, repo: Path, slug: str, parent_kit: Path, parent_cfg: dict
     manifest = build_manifest(parent_cfg, parent_kit, slug, repo, facts, ports, extra,
                               args.console_container or f"{slug}-console",
                               {"agent": args.agent_model, "sandbox_cli": args.sandbox_model,
-                               "retrieval": args.retrieval_model})
+                               "retrieval": args.retrieval_model},
+                              {"engine_launcher": args.engine_launcher,
+                               "base_image_build": args.base_image_build,
+                               "tools_image_build": args.tools_image_build,
+                               "gate_start": args.gate_start,
+                               "storage_retrieval_start": args.storage_retrieval_start})
     show(manifest, heading="proposed manifest -- detected values; edit what detection cannot know:")
 
     target = repo / MANIFEST_NAME
@@ -816,6 +852,22 @@ def main() -> int:
                     help="the model the sandbox's opencode declares in sandbox/opencode-sandbox.json")
     ap.add_argument("--retrieval-model", default=MODEL_DEFAULTS["retrieval"],
                     help="the embedding model scripts/start-mcp-servers.sh exports for retrieval")
+    ap.add_argument("--engine-launcher", default=RUNTIME_COMMAND_DEFAULTS["engine_launcher"],
+                    help="the command the RUNTIME panel prints to create the runtime "
+                         "(sandbox/run-agent.sh; NOT artifacts.launcher, the per-role wrapper)")
+    ap.add_argument("--base-image-build", default=RUNTIME_COMMAND_DEFAULTS["base_image_build"],
+                    help="the command the RUNTIME panel prints to build the base image; {image} is "
+                         "filled from containers.base_image")
+    ap.add_argument("--tools-image-build", default=RUNTIME_COMMAND_DEFAULTS["tools_image_build"],
+                    help="the command the RUNTIME panel prints to build the tools image; {image} is "
+                         "filled from containers.tools_image")
+    ap.add_argument("--gate-start", default=RUNTIME_COMMAND_DEFAULTS["gate_start"],
+                    help="the command the RUNTIME panel prints to start the gate MCP server; "
+                         "{container} and {port} are filled from the config")
+    ap.add_argument("--storage-retrieval-start",
+                    default=RUNTIME_COMMAND_DEFAULTS["storage_retrieval_start"],
+                    help="the command the RUNTIME panel prints to start the storage and retrieval "
+                         "MCP servers; {container} is filled from the config")
     ap.add_argument("--gate", action="append", default=[], metavar="NAME=ARGV",
                     help="add a project-specific gate, e.g. --gate 'packaging=python3 scripts/x.py'")
     ap.add_argument("--write-env", action="store_true",

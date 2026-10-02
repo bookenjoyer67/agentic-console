@@ -667,5 +667,28 @@
     "agent": "",
     "sandbox_cli": "deepseek-v4-flash",
     "retrieval": "BAAI/bge-small-en-v1.5"
+  },
+  "runtime_commands": {
+    "_purpose": [
+      "The exact commands the RUNTIME panel prints for a prerequisite that is missing, and the ONE",
+      "place they are written. The panel is read-only: it prints these and never runs one, and a",
+      "hardcoded copy in the console is how a fork shows its users another project's paths. The",
+      "`{image}`, `{container}` and `{port}` placeholders are substituted at print time from",
+      "containers.base_image / containers.tools_image, console.container and console.ports, so the",
+      "image, container and port names each stay in exactly one place rather than being copied here.",
+      "`engine_launcher` is NOT artifacts.launcher: artifacts.launcher is scripts/run-agent.sh, the",
+      "per-role wrapper that drives one role box, while engine_launcher is sandbox/run-agent.sh, the",
+      "kit's engine that creates the broker, the network and the agent container. They are different",
+      "tools, and neither key may be re-pointed at the other. `gate_start` and",
+      "`storage_retrieval_start` are different commands from different files and are kept apart on",
+      "purpose. This block is deliberately NOT a port.seam: the fork check sweeps a seam for an",
+      "ancestor's literal, and these are printed wiring the wizard proposes and a fork edits freely,",
+      "not identity a fork must differ on."
+    ],
+    "engine_launcher": "bash sandbox/run-agent.sh",
+    "base_image_build": "docker build -t {image} .",
+    "tools_image_build": "docker build -f sandbox/Dockerfile.m3 -t {image} .",
+    "gate_start": "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0",
+    "storage_retrieval_start": "docker exec {container} bash /workspace/scripts/start-mcp-servers.sh"
   }
 }

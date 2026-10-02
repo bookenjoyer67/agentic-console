@@ -112,3 +112,40 @@ defaults records today's effective values and changes no behaviour.
 The block is deliberately not a `port.seam`: its values equal the ancestor's, and a seam whose value
 equals its ancestor's fails the fork check (`agentic.config.json` `"seams"`). A fork that edits one
 line here changes that model in every consumer.
+
+## `runtime_commands`
+
+The exact commands the RUNTIME panel prints for a prerequisite that is missing, and the one place
+they are written. The panel is read-only: it prints these and never runs one, and a hardcoded copy
+in the console is how a fork shows its users another project's paths.
+
+| key | the value this repository ships | the panel row it fixes |
+| --- | --- | --- |
+| `runtime_commands.engine_launcher` | `bash sandbox/run-agent.sh` | the broker and agent containers |
+| `runtime_commands.base_image_build` | `docker build -t {image} .` | the base image |
+| `runtime_commands.tools_image_build` | `docker build -f sandbox/Dockerfile.m3 -t {image} .` | the tools image |
+| `runtime_commands.gate_start` | `docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0` | the gate MCP server |
+| `runtime_commands.storage_retrieval_start` | `docker exec {container} bash /workspace/scripts/start-mcp-servers.sh` | the storage and retrieval MCP servers |
+
+`{image}`, `{container}` and `{port}` are substituted at print time from the config's own keys —
+`containers.base_image` / `containers.tools_image`, `console.container` and `console.ports` — so the
+image, container and port names each stay in exactly one place. Each row refuses in the console's own
+words when a value it reads is empty or absent (`src/state.rs:2581` for the launcher), rather than
+printing a blank line or a guessed command.
+
+`runtime_commands.engine_launcher` is **not** `artifacts.launcher`. `artifacts.launcher`
+(`scripts/run-agent.sh`) is the per-role wrapper that drives one role box; `engine_launcher`
+(`sandbox/run-agent.sh`) is the kit's own engine, which creates the broker, the network and the agent
+container the box needs. They are different tools, and neither key may be re-pointed at the other.
+The gate's start command and the storage/retrieval starter are likewise different commands from
+different files and are kept as two keys.
+
+`scripts/new-project.py --propose` writes all five into the proposal manifest, and `--apply` plants
+them under `runtime_commands` in the fork's config, idempotently. The wizard takes `--engine-launcher`,
+`--base-image-build`, `--tools-image-build`, `--gate-start` and `--storage-retrieval-start`
+(`scripts/new-project.py` `--engine-launcher ENGINE_LAUNCHER`). Accepting those defaults records
+today's effective commands and changes no behaviour.
+
+The block is deliberately not a `port.seam`, for the same reason as `models`: the fork check sweeps a
+seam for an ancestor's literal, and these are printed wiring the wizard proposes and a fork edits
+freely, not identity a fork must differ on.
