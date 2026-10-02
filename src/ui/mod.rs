@@ -487,10 +487,15 @@ fn draw_modal(frame: &mut Frame, area: Rect, app: &App) {
         // for every other action, in the place the text was typed.
         Mode::Composer { .. } | Mode::PromptConfirm { .. } => {}
         Mode::Help => {
-            let popup = centered(area, 84, 26);
+            // Tall enough for the subtitle, the key list as it wraps at this width, and the closing
+            // sentence -- which states what this console does NOT do. A claim that scrolls out of the
+            // box is a claim the operator never reads.
+            let height = (KEY_REFERENCE.len() as u16 + 13).min(area.height);
+            let popup = centered(area, 84, height);
             frame.render_widget(Clear, popup);
             let mut lines = vec![Line::from(Span::styled(
-                " agentic-console -- a read-only window onto this repository's agentic gate",
+                " agentic-console -- a window onto this repository's agentic gate: it reads everything, \
+                 and writes only what you confirm, one step at a time",
                 style::section(),
             ))];
             lines.push(Line::from(""));
@@ -502,7 +507,8 @@ fn draw_modal(frame: &mut Frame, area: Rect, app: &App) {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "  nothing here writes inside the repository, restarts a container or kills a process",
+                "  it writes nothing inside the repository, restarts no container and kills no process; \
+                 the wizard starts the runtime one confirmed step at a time",
                 style::dim(),
             )));
             frame.render_widget(

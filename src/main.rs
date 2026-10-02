@@ -1,5 +1,6 @@
 //! The binary: argument parsing, the three non-interactive modes, and the TUI.
 
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -8,7 +9,7 @@ use agentic_console::{
     app,
     config::Config,
     conversation::{Conversation, DEFAULT_RING},
-    dump, probe, state, timings, ui, USAGE,
+    dump, probe, state, timings, ui, wizard, USAGE,
 };
 
 #[derive(Debug, Default)]
@@ -21,6 +22,10 @@ struct Args {
     dry_run_actions: bool,
     dry_run_action: Option<String>,
     value: Option<String>,
+    /// `--wizard-plan`: the whole runtime chain, run nothing.
+    wizard_plan: bool,
+    /// `--wizard-run`: walk the chain, one confirmation per command step.
+    wizard_run: bool,
     /// `--prompt TEXT`: send one turn of this console's own conversation, for a script and for the
     /// end-to-end test.
     prompt: Option<String>,
@@ -48,6 +53,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--container" => args.container = Some(take_value("--container")?),
             "--dry-run-action" => args.dry_run_action = Some(take_value("--dry-run-action")?),
             "--value" => args.value = Some(take_value("--value")?),
+            "--wizard-plan" => args.wizard_plan = true,
+            "--wizard-run" => args.wizard_run = true,
             "--prompt" => args.prompt = Some(take_value("--prompt")?),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
@@ -99,6 +106,14 @@ fn main() -> ExitCode {
         print!("{}", timings::render(&config));
         return ExitCode::SUCCESS;
     }
+    if args.wizard_plan {
+        let plan = wizard::plan_from_snapshot(&config);
+        print!("{}", wizard::render_plan(&plan));
+        return ExitCode::SUCCESS;
+    }
+    if args.wizard_run {
+        return run_wizard(&config);
+    }
     if args.dry_run_actions {
         print!("{}", actions::dry_run_all(&config));
         return ExitCode::SUCCESS;
@@ -126,6 +141,40 @@ fn main() -> ExitCode {
             eprintln!("agentic-console: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `--wizard-run`: walk the runtime chain, one confirmation per command step.
+///
+/// This is the same [`wizard::walk`] the interactive console drives, with the two faces it needs
+/// supplied from the command line: the one confirmation per command step is a line read from
+/// standard input (`y`/`yes` runs it, anything else stops the walk), and the re-read is the
+/// console's own uncached probe collection. A step whose command does not change what the console
+/// reads stops the walk -- the next command is never run -- and a human step is printed and the walk
+/// ends there rather than faking it.
+fn run_wizard(config: &Config) -> ExitCode {
+    let plan = wizard::plan_from_snapshot(config);
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut confirm = |_step: &wizard::WizardStep| -> bool {
+        print!("  confirm [y/N]: ");
+        let _ = std::io::stdout().flush();
+        match lines.next() {
+            Some(Ok(line)) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+            // No input at all (a closed stdin) is not a confirmation.
+            _ => false,
+        }
+    };
+    let mut run = |step: &wizard::WizardStep| wizard::start(step, &config.repo);
+    let observed = config.clone();
+    let mut observe = move || agentic_console::state::Snapshot::collect(&observed).runtime;
+    let mut out = std::io::stdout();
+    let report = wizard::walk(&plan, &mut confirm, &mut run, &mut observe, &mut out);
+    let _ = writeln!(out);
+    if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

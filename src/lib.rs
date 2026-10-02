@@ -6,8 +6,9 @@
 //! * nothing is invented: every value on every screen is a file read, a `docker` call, or a command's
 //!   output, and `state::Snapshot` is the only place that reads anything;
 //! * every reading carries its source and its age, so a cached value is visibly cached;
-//! * the console is read-only toward the repository, and every action shows its exact command and
-//!   waits for a confirmation keypress before it runs;
+//! * the console reads everything and writes nothing into the repository, and every action -- and
+//!   every step of the runtime wizard -- shows its exact command and waits for a confirmation
+//!   keypress before it runs, one step at a time;
 //! * no read happens on the UI thread. `collector::Collector` owns a worker thread that takes every
 //!   snapshot and hands it to the UI over a channel, so a keypress is answered immediately even while
 //!   the gate server is being asked for its gate list.
@@ -28,10 +29,12 @@ pub mod state;
 pub mod timings;
 pub mod ui;
 pub mod uuid;
+pub mod wizard;
 
 /// The usage text, printed by `--help` and quoted in the README.
 pub const USAGE: &str = "\
-agentic-console -- a read-only terminal window onto a repository's agentic quality gate
+agentic-console -- a terminal window onto a repository's agentic quality gate: it reads everything,
+and writes only what the user confirms, one step at a time
 
 usage: agentic-console [options]
 
@@ -39,6 +42,11 @@ usage: agentic-console [options]
   --config PATH          the config file (default: <repo>/agentic.config.json)
   --container NAME       override console.container (the running sandbox container)
   --dump                 render the current state as plain text on stdout and exit 0
+  --wizard-plan          print the runtime wizard's whole chain: every step, its exact command and
+                         the read behind it, and run nothing -- exit 0
+  --wizard-run           walk that chain: one confirmation per command step, the real state re-read
+                         after every step, a step that changes nothing stops it, and a human step is
+                         named rather than run -- exit 0 when it finishes, 1 when a step fails
   --probe-timings        run every probe once and print its name, its exact invocation, how long it
                          took, whether the cache answered it, and the total -- exit 0
   --dry-run-actions      print every action's exact command instead of running it, exit 0

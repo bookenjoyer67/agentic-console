@@ -468,10 +468,13 @@
   "console": {
     "_purpose": [
       "The runtime facts a terminal console needs that the rest of this file does not carry. A",
-      "console is a window onto the artifacts, never a source of them: it reads this block, the",
-      "journals and `docker ps`, and it never writes inside the repository. Whether one of these",
-      "values is still a reference project's is not recorded here: `port.ancestors` holds what each",
-      "generation shipped, so the console answers that by comparing values and names the generation."
+      "console is a window onto the artifacts, never a source of them: it reads everything it shows",
+      "-- this block, the journals, `docker ps` -- and it writes nothing into the repository. It is",
+      "not inert: its RUNTIME panel only reports, and the runtime wizard it can walk starts the",
+      "runtime one confirmed step at a time, running each shown command only after the user confirms",
+      "it. Whether one of these values is still a reference project's is not recorded here:",
+      "`port.ancestors` holds what each generation shipped, so the console answers that by comparing",
+      "values and names the generation."
     ],
     "container": "agent-console-m1",
     "claude_command": "claude",
@@ -681,14 +684,18 @@
       "kit's engine that creates the broker, the network and the agent container. They are different",
       "tools, and neither key may be re-pointed at the other. `gate_start` and",
       "`storage_retrieval_start` are different commands from different files and are kept apart on",
-      "purpose. This block is deliberately NOT a port.seam: the fork check sweeps a seam for an",
-      "ancestor's literal, and these are printed wiring the wizard proposes and a fork edits freely,",
-      "not identity a fork must differ on."
+      "purpose. `engine_start` is the privileged command a human runs to bring the Docker daemon up,",
+      "and `first_run_login` is the human's first-run credential step: both are shown by the wizard's",
+      "handoff steps and neither is run by this console. This block is deliberately NOT a port.seam:",
+      "the fork check sweeps a seam for an ancestor's literal, and these are printed wiring the wizard",
+      "proposes and a fork edits freely, not identity a fork must differ on."
     ],
+    "engine_start": "sudo systemctl start docker",
     "engine_launcher": "bash sandbox/run-agent.sh",
     "base_image_build": "docker build -t {image} .",
     "tools_image_build": "docker build -f sandbox/Dockerfile.m3 -t {image} .",
     "gate_start": "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0",
-    "storage_retrieval_start": "docker exec {container} bash /workspace/scripts/start-mcp-servers.sh"
+    "storage_retrieval_start": "docker exec {container} bash /workspace/scripts/start-mcp-servers.sh",
+    "first_run_login": "claude"
   }
 }

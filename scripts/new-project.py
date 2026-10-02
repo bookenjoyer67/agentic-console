@@ -75,11 +75,13 @@ MODEL_DEFAULTS = {
 # while this is sandbox/run-agent.sh, the kit's engine. This block is NOT a port.seam: the fork check
 # sweeps identity, and these are the printed wiring the panel shows, which a fork edits freely.
 RUNTIME_COMMAND_DEFAULTS = {
+    "engine_start": "sudo systemctl start docker",
     "engine_launcher": "bash sandbox/run-agent.sh",
     "base_image_build": "docker build -t {image} .",
     "tools_image_build": "docker build -f sandbox/Dockerfile.m3 -t {image} .",
     "gate_start": "docker exec {container} python3 /workspace/mcp/gate/server.py --port {port} --host 0.0.0.0",
     "storage_retrieval_start": "docker exec {container} bash /workspace/scripts/start-mcp-servers.sh",
+    "first_run_login": "claude",
 }
 
 # The paths that carry PROJECT IDENTITY, declared in `port.seams` and checked against every
@@ -704,6 +706,7 @@ def show(manifest: dict, recorded: dict | None = None, heading: str = "") -> Non
     print(f"             build  {cmds['base_image_build']}   |   {cmds['tools_image_build']}")
     print(f"             start  {cmds['gate_start']}")
     print(f"                    {cmds['storage_retrieval_start']}")
+    print(f"             human  {cmds.get('engine_start', '')}   |   {cmds.get('first_run_login', '')}")
     if recorded:
         print(f"\nport.ancestors gets the PARENT's {len(recorded)} values as its newest entry, so "
               f"the check works at any depth rather than one generation:")
@@ -726,11 +729,13 @@ def mode_propose(args, repo: Path, slug: str, parent_kit: Path, parent_cfg: dict
                               args.console_container or f"{slug}-console",
                               {"agent": args.agent_model, "sandbox_cli": args.sandbox_model,
                                "retrieval": args.retrieval_model},
-                              {"engine_launcher": args.engine_launcher,
+                              {"engine_start": args.engine_start,
+                               "engine_launcher": args.engine_launcher,
                                "base_image_build": args.base_image_build,
                                "tools_image_build": args.tools_image_build,
                                "gate_start": args.gate_start,
-                               "storage_retrieval_start": args.storage_retrieval_start})
+                               "storage_retrieval_start": args.storage_retrieval_start,
+                               "first_run_login": args.first_run_login})
     show(manifest, heading="proposed manifest -- detected values; edit what detection cannot know:")
 
     target = repo / MANIFEST_NAME
@@ -852,6 +857,9 @@ def main() -> int:
                     help="the model the sandbox's opencode declares in sandbox/opencode-sandbox.json")
     ap.add_argument("--retrieval-model", default=MODEL_DEFAULTS["retrieval"],
                     help="the embedding model scripts/start-mcp-servers.sh exports for retrieval")
+    ap.add_argument("--engine-start", default=RUNTIME_COMMAND_DEFAULTS["engine_start"],
+                    help="the privileged command the wizard's engine handoff prints to start the "
+                         "Docker daemon; the console never runs it")
     ap.add_argument("--engine-launcher", default=RUNTIME_COMMAND_DEFAULTS["engine_launcher"],
                     help="the command the RUNTIME panel prints to create the runtime "
                          "(sandbox/run-agent.sh; NOT artifacts.launcher, the per-role wrapper)")
@@ -868,6 +876,9 @@ def main() -> int:
                     default=RUNTIME_COMMAND_DEFAULTS["storage_retrieval_start"],
                     help="the command the RUNTIME panel prints to start the storage and retrieval "
                          "MCP servers; {container} is filled from the config")
+    ap.add_argument("--first-run-login", default=RUNTIME_COMMAND_DEFAULTS["first_run_login"],
+                    help="the human's first-run credential command the wizard's handoff step "
+                         "prints; the console never runs it")
     ap.add_argument("--gate", action="append", default=[], metavar="NAME=ARGV",
                     help="add a project-specific gate, e.g. --gate 'packaging=python3 scripts/x.py'")
     ap.add_argument("--write-env", action="store_true",

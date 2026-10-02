@@ -2354,18 +2354,30 @@ fn build_runtime(cfg: &Config, probes: &Probes) -> RuntimeView {
     let mut rows: Vec<RuntimeRow> = Vec::new();
 
     // 1. The daemon, first: every other docker read below fails with it, and its own error is the
-    // reason the rest are unreadable.
+    // reason the rest are unreadable. A daemon that is not answering is fixed by the command the
+    // config carries (`runtime_commands.engine_start`, the privileged `sudo` a human runs); an empty
+    // or absent value refuses the row rather than a literal naming another machine's init system.
     let daemon_age = iso::age_text(probes.docker_daemon.at, at);
+    let engine_start = config_name(cfg, "runtime_commands.engine_start");
     rows.push(match &probes.docker_daemon.error {
-        Some(error) => RuntimeRow {
-            label: "docker daemon".to_string(),
-            key: String::new(),
-            light: Light::Unknown,
-            state: "no reply".to_string(),
-            detail: format!("the daemon did not answer: {error}"),
-            fix: "sudo systemctl start docker".to_string(),
-            source: probes.docker_daemon.source.clone(),
-            age: daemon_age,
+        Some(error) => match &engine_start {
+            Err(sentence) => refused_row(
+                cfg,
+                at,
+                "docker daemon",
+                "runtime_commands.engine_start",
+                sentence.clone(),
+            ),
+            Ok(fix) => RuntimeRow {
+                label: "docker daemon".to_string(),
+                key: String::new(),
+                light: Light::Unknown,
+                state: "no reply".to_string(),
+                detail: format!("the daemon did not answer: {error}"),
+                fix: fix.clone(),
+                source: probes.docker_daemon.source.clone(),
+                age: daemon_age,
+            },
         },
         None => RuntimeRow {
             label: "docker daemon".to_string(),
@@ -3177,6 +3189,7 @@ mod runtime_tests {
                 "ports": {"gate": 8003, "storage": 8001, "retrieval": 8002}
               },
               "runtime_commands": {
+                "engine_start": "fixture-engine-start",
                 "engine_launcher": "fixture-engine-launch",
                 "base_image_build": "fixture-build-base {image}",
                 "tools_image_build": "fixture-build-tools {image}",
@@ -3297,13 +3310,18 @@ mod runtime_tests {
             "a failed read is never drawn as present"
         );
         // The one row that still carries a fix is the daemon: a daemon that is not answering is fixed
-        // by starting it, in this repository's own words (`sandbox/run-agent.sh` prints exactly that
-        // sentence). Every other row a failed read touched is unreadable with no fix -- the console
-        // does not call a thing missing, or name a way to fix it, from a read it never took.
+        // by starting it, in the command the config carries (`runtime_commands.engine_start`), not a
+        // literal naming an init system. Every other row a failed read touched is unreadable with no
+        // fix -- the console does not call a thing missing, or name a way to fix it, from a read it
+        // never took.
         for row in &view.rows {
             if row.label == "docker daemon" {
                 assert_eq!(row.state, "no reply");
-                assert!(row.fix.contains("systemctl start docker"));
+                assert!(
+                    row.fix.contains("fixture-engine-start"),
+                    "the daemon's fix is read from runtime_commands.engine_start: {}",
+                    row.fix
+                );
             } else {
                 assert!(
                     row.fix.is_empty(),

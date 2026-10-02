@@ -1108,6 +1108,49 @@ fn the_key_reference_lists_the_documented_keys() {
     }
 }
 
+/// The console's write rule, stated precisely, on the screen that states it.
+///
+/// The claim used to be "read-only" in one unqualified word. That word is now incomplete: the
+/// console still writes nothing into the repository, but it can start the runtime one confirmed step
+/// at a time. The fix is the precise sentence, and this test is what keeps it precise -- a later edit
+/// that quietly widens the authority without widening the wording fails here.
+#[test]
+fn the_help_modal_states_the_write_rule_precisely() {
+    let fixture = Fixture::build("help-invariant");
+    let mut app = fixture.app();
+    press(&mut app, KeyCode::Char('?'));
+    let text = frame_text(&app, 200, 50);
+    assert!(
+        text.contains("reads everything") && text.contains("writes only what you confirm"),
+        "the help modal states what the console reads and what it writes\n{text}"
+    );
+    assert!(
+        text.contains("it writes nothing inside the repository"),
+        "the help modal still states the repository invariant\n{text}"
+    );
+    assert!(
+        text.contains("one confirmed step at a time"),
+        "the help modal names the wizard's one-step-at-a-time authority\n{text}"
+    );
+}
+
+/// The same rule in the usage text: the headline is not allowed to say "read-only" unqualified.
+#[test]
+fn the_usage_text_restates_the_write_rule() {
+    assert!(
+        agentic_console::USAGE.contains("reads everything"),
+        "the usage text states what the console reads"
+    );
+    assert!(
+        agentic_console::USAGE.contains("writes only what the user confirms"),
+        "the usage text states what the console writes"
+    );
+    assert!(
+        !agentic_console::USAGE.contains("a read-only terminal window"),
+        "the usage headline no longer claims an unqualified read-only console"
+    );
+}
+
 #[test]
 fn the_brief_action_stages_the_brief_outside_the_repository() {
     let fixture = Fixture::build("brief-staged");

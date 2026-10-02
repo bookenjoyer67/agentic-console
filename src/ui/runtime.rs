@@ -196,9 +196,16 @@ mod tests {
         );
         assert!(wide.contains("docker daemon"), "{wide}");
         assert!(wide.contains("MCP server gate"), "{wide}");
+        // The contract sentence is always on the panel. When every read failed there is no command the
+        // panel could back, so it offers none -- and that is the case this fixture exists to pin: a
+        // command it cannot justify would be worse than no command.
         assert!(
-            wide.contains("nothing here is run") && wide.contains("never run from here"),
-            "the read-only contract is on the panel\n{wide}"
+            wide.contains("nothing here is run"),
+            "the no-run contract is on the panel\n{wide}"
+        );
+        assert!(
+            !wide.contains("never run from here"),
+            "a panel whose reads all failed offers no command at all\n{wide}"
         );
 
         // The narrow target: same panel, no panic, still one bordered block.
